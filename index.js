@@ -1,11 +1,12 @@
 const express = require("express");
-const fs = require("fs");
-const qrcode = require("qrcode");
 const {
     default: makeWASocket,
     useMultiFileAuthState,
     DisconnectReason
 } = require("@whiskeysockets/baileys");
+
+const qrcode = require("qrcode");
+const fs = require("fs");
 
 const app = express();
 app.use(express.json());
@@ -14,27 +15,15 @@ let sock;
 let qrCodeImage = null;
 let isConnected = false;
 
-// ================= CLEAN SESSION =================
-try {
-    fs.rmSync("auth", { recursive: true, force: true });
-    console.log("Old auth cleared");
-} catch (e) {}
-
-// ================= START WHATSAPP =================
+// ================= START =================
 async function start() {
     const { state, saveCreds } = await useMultiFileAuthState("auth");
 
     sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
-        browser: ["Ubuntu", "Chrome", "120.0.0"],
-
-        // 🔥 تحسينات مهمة ضد 405
-        connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 0,
-        keepAliveIntervalMs: 15000,
-        markOnlineOnConnect: false,
-        syncFullHistory: false
+        browser: ["Chrome (Linux)", "Chrome", "120.0.0"],
+        keepAliveIntervalMs: 25000
     });
 
     sock.ev.on("creds.update", saveCreds);
@@ -42,46 +31,39 @@ async function start() {
     sock.ev.on("connection.update", async (update) => {
         const { connection, qr, lastDisconnect } = update;
 
-        // ================= QR =================
+        // توليد QR
         if (qr) {
-            console.log("📌 QR RECEIVED");
-            console.log(qr);
-
             qrCodeImage = await qrcode.toDataURL(qr);
         }
 
-        // ================= CONNECTED =================
+        // اتصال ناجح
         if (connection === "open") {
             console.log("✅ WhatsApp Connected");
             qrCodeImage = null;
             isConnected = true;
         }
 
-        // ================= CLOSED =================
+        // انقطاع الاتصال
         if (connection === "close") {
             isConnected = false;
 
             const code = lastDisconnect?.error?.output?.statusCode;
             console.log("❌ Closed:", code);
 
-            // 🚫 منع loop إذا WhatsApp حظر الاتصال
-            if (code === 405) {
-                console.log("🚫 Blocked (405) - WhatsApp refused connection");
-                return;
-            }
-
             if (code === DisconnectReason.loggedOut) {
-                console.log("⚠️ Logged out - scan QR again");
+                console.log("🚫 Logged out - manual login required");
                 return;
             }
 
-            console.log("🔄 Reconnecting...");
-            setTimeout(start, 5000);
+            setTimeout(() => {
+                console.log("🔄 Reconnecting...");
+                start();
+            }, 5000);
         }
     });
 }
 
-// ================= SEND MESSAGE =================
+// ================= SEND (جاهز) =================
 app.post("/send", async (req, res) => {
     try {
         const { groupId, image, caption } = req.body;
@@ -108,21 +90,19 @@ app.get("/status", (req, res) => {
     res.json({ connected: isConnected });
 });
 
-// ================= QR IMAGE =================
+// ================= QR IMAGE (FIXED) =================
 app.get("/qr-image", (req, res) => {
-    if (!qrCodeImage) {
-        return res.status(404).send("no-qr");
-    }
+    if (!qrCodeImage) return res.status(404).send("QR not ready");
 
-    const base64 = qrCodeImage.replace("data:image/png;base64,", "");
-    const img = Buffer.from(base64, "base64");
+    const img = qrCodeImage.replace("data:image/png;base64,", "");
+    const buffer = Buffer.from(img, "base64");
 
     res.writeHead(200, {
         "Content-Type": "image/png",
-        "Cache-Control": "no-store"
+        "Content-Length": buffer.length
     });
 
-    res.end(img);
+    res.end(buffer);
 });
 
 // ================= QR PAGE =================
@@ -139,17 +119,18 @@ app.get("/qr", (req, res) => {
             color: white;
             text-align: center;
             font-family: Arial;
-            padding-top: 50px;
-        }
-        img {
-            margin-top: 20px;
-            border: 5px solid #25D366;
-            border-radius: 12px;
+            padding-top: 60px;
         }
         .box {
             background: #222;
             padding: 20px;
             display: inline-block;
+            border-radius: 12px;
+        }
+        img {
+            margin-top: 20px;
+            width: 300px;
+            border: 5px solid #25D366;
             border-radius: 12px;
         }
     </style>
@@ -159,7 +140,7 @@ app.get("/qr", (req, res) => {
 <div class="box">
     <h2>📱 WhatsApp QR Login</h2>
     <p>امسح الكود لتسجيل الدخول</p>
-    <img id="qr" src="/qr-image?t=1" />
+    <img id="qr" src="/qr-image" />
 </div>
 
 <script>
@@ -173,8 +154,8 @@ setInterval(() => {
     `);
 });
 
-// ================= START SERVER =================
-const PORT = process.env.PORT || 3001;
+// ================= SERVER START =================
+const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
     console.log("🚀 Server running on", PORT);
