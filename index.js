@@ -37,7 +37,7 @@ async function start() {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             console.log("❌ انقطع الاتصال. إعادة محاولة الربط خلال 30 ثانية...");
             if (shouldReconnect) {
-                setTimeout(start, 30000); // زيادة وقت الانتظار لتجنب الحظر
+                setTimeout(start, 60000); // زيادة وقت الانتظار لتجنب الحظر
             }
         }
     });
