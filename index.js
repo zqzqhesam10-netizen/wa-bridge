@@ -6,45 +6,53 @@ const {
 } = require("@whiskeysockets/baileys");
 
 const qrcode = require("qrcode");
-const pino = require("pino");
-
 const app = express();
+
 app.use(express.json());
 
 let sock;
-let qrCodeData = "";
+let qrCodeImage = null;
 let isConnected = false;
 
-// ================= START WHATSAPP =================
+/* ================= START WHATSAPP ================= */
 async function start() {
-    const { state, saveCreds } = await useMultiFileAuthState("/tmp/auth_info");
+    const { state, saveCreds } = await useMultiFileAuthState("auth");
 
     sock = makeWASocket({
         auth: state,
-        logger: pino({ level: "silent" }),
-        browser: ["Render Server", "Chrome", "120.0.0"]
+        printQRInTerminal: false,
+        browser: ["Ubuntu", "Chrome", "120.0.0"]
     });
 
     sock.ev.on("creds.update", saveCreds);
 
-    sock.ev.on("connection.update", (update) => {
+    sock.ev.on("connection.update", async (update) => {
         const { connection, qr, lastDisconnect } = update;
 
         if (qr) {
-            qrCodeData = qr;
-            console.log("📌 QR updated");
+            qrCodeImage = await qrcode.toDataURL(qr);
         }
 
         if (connection === "open") {
-            console.log("✅ CONNECTED");
             isConnected = true;
-            qrCodeData = "";
+            qrCodeImage = null;
+
+            console.log("✅ WhatsApp Connected");
+
+            // 🔥 جلب الجروبات تلقائيًا عند الاتصال
+            const groups = await sock.groupFetchAllParticipating();
+
+            console.log("📌 GROUPS LIST:");
+            for (let id in groups) {
+                console.log(groups[id].subject + " => " + id);
+            }
         }
 
         if (connection === "close") {
             isConnected = false;
 
             const code = lastDisconnect?.error?.output?.statusCode;
+
             console.log("❌ Closed:", code);
 
             if (code !== DisconnectReason.loggedOut) {
@@ -54,40 +62,7 @@ async function start() {
     });
 }
 
-// ================= QR PAGE =================
-app.get("/qr", async (req, res) => {
-    if (isConnected) {
-        return res.send("<h1 style='color:green;text-align:center'>✅ تم الاتصال بالفعل</h1>");
-    }
-
-    if (!qrCodeData) {
-        return res.send("<h1 style='text-align:center'>⏳ جاري تجهيز QR...</h1>");
-    }
-
-    const img = await qrcode.toDataURL(qrCodeData);
-
-    res.send(`
-        <html>
-        <head>
-            <title>WhatsApp QR</title>
-        </head>
-        <body style="background:#111;color:white;text-align:center;padding-top:50px">
-            <h2>📱 امسح QR للربط</h2>
-            <img src="${img}" style="width:300px;border:5px solid #25D366;border-radius:12px"/>
-        </body>
-        </html>
-    `);
-});
-
-// ================= STATUS =================
-app.get("/status", (req, res) => {
-    res.json({
-        connected: isConnected,
-        hasQR: !!qrCodeData
-    });
-});
-
-// ================= SEND MESSAGE =================
+/* ================= SEND MESSAGE ================= */
 app.post("/send", async (req, res) => {
     try {
         const { groupId, text } = req.body;
@@ -96,15 +71,42 @@ app.post("/send", async (req, res) => {
             return res.status(500).json({ error: "not connected" });
         }
 
+        if (!groupId || !text) {
+            return res.status(400).json({ error: "missing data" });
+        }
+
         await sock.sendMessage(groupId, { text });
 
         res.json({ ok: true });
+
     } catch (e) {
+        console.log(e);
         res.status(500).json({ error: e.message });
     }
 });
 
-// ================= START SERVER =================
+/* ================= STATUS ================= */
+app.get("/status", (req, res) => {
+    res.json({
+        connected: isConnected,
+        hasQR: !!qrCodeImage
+    });
+});
+
+/* ================= QR PAGE ================= */
+app.get("/qr", async (req, res) => {
+    if (isConnected) return res.send("<h1>✅ Connected</h1>");
+    if (!qrCodeImage) return res.send("<h1>⏳ Loading QR...</h1>");
+
+    res.send(`
+        <div style="text-align:center;margin-top:50px">
+            <h2>Scan QR Code</h2>
+            <img src="${qrCodeImage}" style="width:300px"/>
+        </div>
+    `);
+});
+
+/* ================= START SERVER ================= */
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
