@@ -40,22 +40,24 @@ async function start() {
         }
 
         if (connection === "close") {
-    isConnected = false;
+            isConnected = false;
 
-    const code = lastDisconnect?.error?.output?.statusCode;
-    console.log("Closed:", code);
+            const code = lastDisconnect?.error?.output?.statusCode;
+            console.log("Closed:", code);
 
-    if (code === DisconnectReason.loggedOut) {
-        console.log("Logged out - restart manually");
-        return;
-    }
+            if (code === DisconnectReason.loggedOut) {
+                console.log("Logged out - restart manually");
+                return;
+            }
 
-    setTimeout(() => {
-        console.log("Reconnecting...");
-        start();
-    }, 10000);
+            setTimeout(() => {
+                console.log("Reconnecting...");
+                start();
+            }, 10000);
+        }
+    });
 }
-        
+
 // ================= SEND =================
 app.post("/send", async (req, res) => {
     try {
@@ -79,7 +81,7 @@ app.post("/send", async (req, res) => {
         res.status(500).json({ error: e.message });
     }
 });
-        
+
 app.get("/qr", (req, res) => {
     if (!qrCodeImage) return res.send("QR not ready");
     res.send(`<img src="${qrCodeImage}"/>`);
@@ -91,4 +93,7 @@ app.get("/status", (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 
-app.listen(PORT, () => console.log("WhatsApp service running on", PORT));
+app.listen(PORT, () => {
+    console.log("WhatsApp service running on", PORT);
+    start(); // 🔥 مهم جداً تشغيل واتساب هنا
+});
