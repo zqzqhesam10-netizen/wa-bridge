@@ -6,14 +6,24 @@ const {
 } = require("@whiskeysockets/baileys");
 
 const qrcode = require("qrcode");
+const axios = require("axios");
+const cheerio = require("cheerio");
 
 const app = express();
 app.use(express.json());
 
+// ================= STATE =================
 let sock;
 let qrCodeImage = null;
+let isConnected = false;
 
-// ================= START WHATSAPP =================
+// منع التكرار
+let sentLinks = new Set();
+
+// ================= GROUP =================
+const GROUP_ID = process.env.GROUP_ID || "CxG1mLQR5VtGhiZaaAMqyI@g.us";
+
+// ================= WHATSAPP START =================
 async function start() {
     const { state, saveCreds } = await useMultiFileAuthState("auth");
 
@@ -23,37 +33,31 @@ async function start() {
         browser: ["Render Bot", "Chrome", "1.0.0"]
     });
 
-    // حفظ الجلسة (مهم جداً)
     sock.ev.on("creds.update", saveCreds);
 
-    // تحديث الاتصال + QR
     sock.ev.on("connection.update", async (update) => {
         const { connection, qr, lastDisconnect } = update;
 
-        // QR توليد
         if (qr) {
             qrCodeImage = await qrcode.toDataURL(qr);
             console.log("📌 QR Updated");
         }
 
-        // اتصال ناجح
         if (connection === "open") {
             console.log("✅ WhatsApp Connected");
             qrCodeImage = null;
+            isConnected = true;
         }
 
-        // انقطاع الاتصال
         if (connection === "close") {
+            isConnected = false;
+
             const reason = lastDisconnect?.error?.output?.statusCode;
+            console.log("❌ Connection closed:", reason);
 
-            console.log("❌ Connection closed. Reason:", reason);
-
-            // إذا تسجيل خروج أو خطأ قوي → إعادة تسجيل
             if (reason === DisconnectReason.loggedOut) {
-                console.log("⚠️ Logged out - deleting session...");
                 process.exit(1);
             } else {
-                console.log("🔁 Reconnecting...");
                 setTimeout(start, 3000);
             }
         }
@@ -64,59 +68,123 @@ async function start() {
 
 start();
 
+// ================= SEND =================
+async function sendToGroup(image, caption) {
+    if (!sock || !isConnected) return;
+
+    try {
+        await sock.sendMessage(GROUP_ID, {
+            image: { url: image },
+            caption: caption || ""
+        });
+
+        console.log("📤 Sent");
+    } catch (e) {
+        console.log("SEND ERROR:", e.message);
+    }
+}
+
+// ================= SCRAPER =================
+async function checkUpdates() {
+    try {
+        console.log("🔎 Checking...");
+
+        const res = await axios.get("https://tuktukhd.com/recent/");
+        const $ = cheerio.load(res.data);
+
+        let count = 0;
+
+        $("a").each(async (i, el) => {
+
+            if (count >= 5) return;
+
+            const img =
+                $(el).find("img").attr("src") ||
+                $(el).find("img").attr("data-src");
+
+            const title =
+                $(el).attr("title") ||
+                $(el).find("img").attr("alt") ||
+                "جديد";
+
+            const link = $(el).attr("href");
+
+            if (!img || !link) return;
+
+            if (sentLinks.has(link)) return;
+
+            sentLinks.add(link);
+
+            const msg = `📺 ${title}\n🔥 جديد الآن`;
+
+            await sendToGroup(img, msg);
+
+            count++;
+        });
+
+    } catch (e) {
+        console.log("SCRAPER ERROR:", e.message);
+    }
+}
+
+// ================= AUTO RUN =================
+setInterval(checkUpdates, 60 * 1000);
+
 // ================= ROUTES =================
 
-// الصفحة الرئيسية
+// الحالة
 app.get("/", (req, res) => {
     res.send("WhatsApp Bridge Running ✅");
 });
 
-// QR عرض
+// QR
 app.get("/qr", (req, res) => {
     if (!qrCodeImage) {
-        return res.send("<h3>QR not ready or already connected ✅</h3>");
+        return res.send("<h3>Connected or QR not ready</h3>");
     }
 
     res.send(`
         <html>
-        <body style="text-align:center;font-family:Arial">
-            <h2>Scan QR with WhatsApp</h2>
+        <body style="text-align:center">
+            <h2>Scan QR</h2>
             <img src="${qrCodeImage}" />
         </body>
         </html>
     `);
 });
 
-// إرسال للمجموعة
-app.post("/send", async (req, res) => {
+// ================= CONTROL =================
+
+// فحص يدوي
+app.get("/check-now", async (req, res) => {
     try {
-        const { image, caption } = req.body;
-
-        if (!sock) {
-            return res.status(400).json({ error: "WhatsApp not connected yet" });
-        }
-
-        await sock.sendMessage(process.env.GROUP_ID, {
-            image: { url: image },
-            caption: caption || ""
-        });
-
-        res.json({ status: "sent" });
-
+        await checkUpdates();
+        res.json({ status: "checked", ok: true });
     } catch (e) {
-        console.log("SEND ERROR:", e);
-        res.status(500).json({ error: "failed" });
+        res.status(500).json({ error: e.message });
     }
 });
 
-// Ping
-app.get("/ping", (req, res) => {
-    res.send("OK");
+// مسح الذاكرة (منع التكرار)
+app.get("/reset", (req, res) => {
+    sentLinks.clear();
+    res.json({ status: "memory cleared", ok: true });
 });
 
-// ================= START SERVER =================
+// Reset + Check
+app.get("/reset-check", async (req, res) => {
+    try {
+        sentLinks.clear();
+        await checkUpdates();
+        res.json({ status: "reset + checked", ok: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ping
+app.get("/ping", (req, res) => res.send("OK"));
+
+// ================= START =================
 const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-    console.log("Server running on port", PORT);
-});
+app.listen(PORT, () => console.log("Server running on", PORT));
