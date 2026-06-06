@@ -40,22 +40,25 @@ async function start() {
         }
 
         if (connection === "close") {
-            isConnected = false;
-            const code = lastDisconnect?.error?.output?.statusCode;
+    isConnected = false;
 
-            console.log("Closed:", code);
+    const code = lastDisconnect?.error?.output?.statusCode;
+    console.log("Closed:", code);
 
-            setTimeout(start, 10000);
-        }
-    });
+    if (code === DisconnectReason.loggedOut) {
+        console.log("Logged out - restart manually");
+        return;
+    }
+
+    setTimeout(() => {
+        console.log("Reconnecting...");
+        start();
+    }, 10000);
 }
-
-start();
-
+        
 // ================= SEND =================
 app.post("/send", async (req, res) => {
-    try {
-        const { groupId, image, caption } = req.body;
+    console.log("INCOMING:", req.body);
 
         if (!sock || !isConnected) {
             return res.status(500).json({ error: "not connected" });
@@ -83,4 +86,6 @@ app.get("/status", (req, res) => {
     res.json({ connected: isConnected });
 });
 
-app.listen(3001, () => console.log("WhatsApp service running"));
+const PORT = process.env.PORT || 3001;
+
+app.listen(PORT, () => console.log("WhatsApp service running on", PORT));
