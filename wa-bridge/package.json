@@ -1,0 +1,15 @@
+{
+  "name": "wa-bridge",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.0",
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0",
+    "express": "^4.18.2",
+    "qrcode": "^1.5.3"
+  }
+}
