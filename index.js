@@ -14,7 +14,7 @@ let sock;
 let qrCodeImage = null;
 let isConnected = false;
 
-// ================= CLEAN OLD SESSION =================
+// ================= CLEAN SESSION =================
 try {
     fs.rmSync("auth", { recursive: true, force: true });
     console.log("Old auth cleared");
@@ -28,8 +28,13 @@ async function start() {
         auth: state,
         printQRInTerminal: false,
         browser: ["Ubuntu", "Chrome", "120.0.0"],
+
+        // 🔥 تحسينات مهمة ضد 405
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 0,
+        keepAliveIntervalMs: 15000,
         markOnlineOnConnect: false,
-        keepAliveIntervalMs: 25000
+        syncFullHistory: false
     });
 
     sock.ev.on("creds.update", saveCreds);
@@ -37,28 +42,40 @@ async function start() {
     sock.ev.on("connection.update", async (update) => {
         const { connection, qr, lastDisconnect } = update;
 
+        // ================= QR =================
         if (qr) {
-            console.log("QR GENERATED");
+            console.log("📌 QR RECEIVED");
+            console.log(qr);
+
             qrCodeImage = await qrcode.toDataURL(qr);
         }
 
+        // ================= CONNECTED =================
         if (connection === "open") {
-            console.log("WhatsApp Connected");
+            console.log("✅ WhatsApp Connected");
             qrCodeImage = null;
             isConnected = true;
         }
 
+        // ================= CLOSED =================
         if (connection === "close") {
             isConnected = false;
 
             const code = lastDisconnect?.error?.output?.statusCode;
-            console.log("Closed:", code);
+            console.log("❌ Closed:", code);
 
-            if (code === DisconnectReason.loggedOut) {
-                console.log("Logged out - تحتاج إعادة مسح QR");
+            // 🚫 منع loop إذا WhatsApp حظر الاتصال
+            if (code === 405) {
+                console.log("🚫 Blocked (405) - WhatsApp refused connection");
                 return;
             }
 
+            if (code === DisconnectReason.loggedOut) {
+                console.log("⚠️ Logged out - scan QR again");
+                return;
+            }
+
+            console.log("🔄 Reconnecting...");
             setTimeout(start, 5000);
         }
     });
@@ -81,7 +98,7 @@ app.post("/send", async (req, res) => {
         res.json({ ok: true });
 
     } catch (e) {
-        console.log(e);
+        console.log("ERROR:", e);
         res.status(500).json({ error: e.message });
     }
 });
@@ -160,6 +177,6 @@ setInterval(() => {
 const PORT = process.env.PORT || 3001;
 
 app.listen(PORT, () => {
-    console.log("Server running on", PORT);
+    console.log("🚀 Server running on", PORT);
     start();
 });
