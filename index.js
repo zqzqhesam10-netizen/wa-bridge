@@ -1,5 +1,5 @@
 const express = require("express");
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
+const { default: makeWASocket, useMultiFileAuthState } = require("@whiskeysockets/baileys");
 const qrcode = require("qrcode");
 
 const app = express();
@@ -8,6 +8,7 @@ app.use(express.json());
 let sock;
 let qrCodeImage = null;
 
+// ================= START WHATSAPP =================
 async function start() {
     const { state, saveCreds } = await useMultiFileAuthState("auth");
 
@@ -19,7 +20,6 @@ async function start() {
     sock.ev.on("connection.update", async (update) => {
         const { connection, qr } = update;
 
-        // 🔥 هنا نحول QR إلى صورة
         if (qr) {
             qrCodeImage = await qrcode.toDataURL(qr);
             console.log("QR Updated");
@@ -32,7 +32,7 @@ async function start() {
 
         if (connection === "close") {
             console.log("❌ Connection closed, reconnecting...");
-            start();
+            setTimeout(start, 3000);
         }
     });
 
@@ -43,8 +43,14 @@ async function start() {
 
 start();
 
+// ================= ROUTES =================
 
-// 🔥 عرض QR في المتصفح
+// الصفحة الرئيسية
+app.get("/", (req, res) => {
+    res.send("WhatsApp Bridge Running ✅");
+});
+
+// QR
 app.get("/qr", (req, res) => {
     if (!qrCodeImage) {
         return res.send("<h3>QR not ready yet... refresh</h3>");
@@ -60,15 +66,18 @@ app.get("/qr", (req, res) => {
     `);
 });
 
-
-// 🔥 إرسال للمجموعة
+// إرسال رسالة للمجموعة
 app.post("/send", async (req, res) => {
     try {
         const { image, caption } = req.body;
 
+        if (!sock) {
+            return res.status(400).json({ error: "WhatsApp not connected yet" });
+        }
+
         await sock.sendMessage(process.env.GROUP_ID, {
             image: { url: image },
-            caption: caption
+            caption: caption || ""
         });
 
         res.json({ status: "sent" });
@@ -79,13 +88,14 @@ app.post("/send", async (req, res) => {
     }
 });
 
-
-// 🔥 ping لـ UptimeRobot
+// UptimeRobot ping
 app.get("/ping", (req, res) => {
     res.send("OK");
 });
 
+// ================= START SERVER =================
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
     console.log("Server running on port", PORT);
 });
