@@ -6,38 +6,40 @@ const {
 const pino = require("pino");
 
 async function start() {
-    // استخدام مجلد مؤقت للبيانات (مناسب لـ Render)
-    const { state, saveCreds } = await useMultiFileAuthState("/tmp/auth");
+    const { state, saveCreds } = await useMultiFileAuthState("./auth_info");
 
     const sock = makeWASocket({
         auth: state,
-        logger: pino({ level: "silent" }), // إخفاء السجلات غير الضرورية
-        printQRInTerminal: true, // طباعة الكود مباشرة في الـ Console
-        browser: ["WhatsApp Bot", "Chrome", "1.0.0"]
+        logger: pino({ level: "silent" }),
+        // إعدادات لضمان استقرار الاتصال في البيئات السحابية
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 60000,
+        keepAliveIntervalMs: 30000,
+        browser: ["WhatsApp Server", "Chrome", "125.0.0"]
     });
 
     sock.ev.on("creds.update", saveCreds);
 
     sock.ev.on("connection.update", (update) => {
-        const { connection, lastDisconnect } = update;
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+            console.log("📌 QR Code تم توليده، يرجى مسحه من الـ Logs");
+            // في حال كنت تستخدم مكتبة qrcode لعرضه كنص
+            require('qrcode-terminal').generate(qr, {small: true});
+        }
 
         if (connection === "open") {
-            console.log("✅ تم الاتصال بنجاح بخدمة واتساب.");
+            console.log("✅ تم الاتصال بنجاح!");
         }
 
         if (connection === "close") {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log("❌ تم إغلاق الاتصال. محاولة إعادة الاتصال...");
-            
+            console.log("❌ انقطع الاتصال. إعادة محاولة الربط خلال 30 ثانية...");
             if (shouldReconnect) {
-                setTimeout(start, 5000);
+                setTimeout(start, 30000); // زيادة وقت الانتظار لتجنب الحظر
             }
         }
-    });
-
-    sock.ev.on("messages.upsert", async (m) => {
-        // هنا يمكنك إضافة منطق التعامل مع الرسائل المستلمة
-        console.log("📥 رسالة جديدة مستلمة");
     });
 }
 
