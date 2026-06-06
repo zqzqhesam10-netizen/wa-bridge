@@ -1,11 +1,11 @@
 const express = require("express");
+const fs = require("fs");
+const qrcode = require("qrcode");
 const {
     default: makeWASocket,
     useMultiFileAuthState,
     DisconnectReason
 } = require("@whiskeysockets/baileys");
-
-const qrcode = require("qrcode");
 
 const app = express();
 app.use(express.json());
@@ -13,6 +13,12 @@ app.use(express.json());
 let sock;
 let qrCodeImage = null;
 let isConnected = false;
+
+// ================= CLEAN OLD SESSION =================
+try {
+    fs.rmSync("auth", { recursive: true, force: true });
+    console.log("Old auth cleared");
+} catch (e) {}
 
 // ================= START WHATSAPP =================
 async function start() {
@@ -22,6 +28,7 @@ async function start() {
         auth: state,
         printQRInTerminal: false,
         browser: ["Ubuntu", "Chrome", "120.0.0"],
+        markOnlineOnConnect: false,
         keepAliveIntervalMs: 25000
     });
 
@@ -31,8 +38,8 @@ async function start() {
         const { connection, qr, lastDisconnect } = update;
 
         if (qr) {
-            qrCodeImage = await qrcode.toDataURL(qr);
             console.log("QR GENERATED");
+            qrCodeImage = await qrcode.toDataURL(qr);
         }
 
         if (connection === "open") {
@@ -48,11 +55,11 @@ async function start() {
             console.log("Closed:", code);
 
             if (code === DisconnectReason.loggedOut) {
-                console.log("Logged out - تحتاج تسجيل جديد");
+                console.log("Logged out - تحتاج إعادة مسح QR");
                 return;
             }
 
-            setTimeout(start, 10000);
+            setTimeout(start, 5000);
         }
     });
 }
@@ -74,6 +81,7 @@ app.post("/send", async (req, res) => {
         res.json({ ok: true });
 
     } catch (e) {
+        console.log(e);
         res.status(500).json({ error: e.message });
     }
 });
@@ -83,7 +91,7 @@ app.get("/status", (req, res) => {
     res.json({ connected: isConnected });
 });
 
-// ================= QR IMAGE (FIXED) =================
+// ================= QR IMAGE =================
 app.get("/qr-image", (req, res) => {
     if (!qrCodeImage) {
         return res.status(404).send("no-qr");
@@ -152,6 +160,6 @@ setInterval(() => {
 const PORT = process.env.PORT || 3001;
 
 app.listen(PORT, () => {
-    console.log("WhatsApp service running on", PORT);
+    console.log("Server running on", PORT);
     start();
 });
