@@ -1,20 +1,35 @@
-const {
-    default: makeWASocket,
-    useMultiFileAuthState,
-    DisconnectReason
-} = require("@whiskeysockets/baileys");
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
 const pino = require("pino");
+const express = require("express");
+const qrcode = require("qrcode");
+const app = express();
 
+let qrCodeData = "";
+let isConnected = false;
+
+// 1. خادم الويب للعرض
+app.get("/qr", async (req, res) => {
+    if (isConnected) return res.send("<h1>✅ تم الاتصال بالفعل</h1>");
+    if (!qrCodeData) return res.send("<h1>⏳ جاري تجهيز الكود، حدث الصفحة...</h1>");
+    
+    const qrImage = await qrcode.toDataURL(qrCodeData);
+    res.send(`
+        <div style="text-align:center; padding-top:50px;">
+            <h1>امسح كود الواتساب</h1>
+            <img src="${qrImage}" />
+        </div>
+    `);
+});
+
+app.listen(process.env.PORT || 3000);
+
+// 2. خادم الواتساب
 async function start() {
     const { state, saveCreds } = await useMultiFileAuthState("/tmp/auth_info");
 
     const sock = makeWASocket({
         auth: state,
         logger: pino({ level: "silent" }),
-        // إعدادات لضمان استقرار الاتصال في البيئات السحابية
-        connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 60000,
-        keepAliveIntervalMs: 30000,
         browser: ["WhatsApp Server", "Chrome", "125.0.0"]
     });
 
@@ -22,22 +37,12 @@ async function start() {
 
     sock.ev.on("connection.update", (update) => {
         const { connection, lastDisconnect, qr } = update;
-
-        if (qr) {
-            console.log("📌 QR Code تم توليده، يرجى مسحه من الـ Logs");
-            // في حال كنت تستخدم مكتبة qrcode لعرضه كنص
-            require('qrcode-terminal').generate(qr, {small: true});
-        }
-
-        if (connection === "open") {
-            console.log("✅ تم الاتصال بنجاح!");
-        }
-
+        if (qr) qrCodeData = qr;
+        if (connection === "open") isConnected = true;
         if (connection === "close") {
-            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log("❌ انقطع الاتصال. إعادة محاولة الربط خلال 30 ثانية...");
-            if (shouldReconnect) {
-                setTimeout(start, 60000); // زيادة وقت الانتظار لتجنب الحظر
+            isConnected = false;
+            if (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
+                setTimeout(start, 5000);
             }
         }
     });
