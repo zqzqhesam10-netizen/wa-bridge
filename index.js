@@ -6,7 +6,7 @@ const {
 const pino = require("pino");
 
 async function start() {
-    const { state, saveCreds } = await useMultiFileAuthState("./auth_info");
+    const { state, saveCreds } = await useMultiFileAuthState("/tmp/auth_info");
 
     const sock = makeWASocket({
         auth: state,
