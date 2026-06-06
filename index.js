@@ -14,6 +14,7 @@ let sock;
 let qrCodeImage = null;
 let isConnected = false;
 
+// ================= START WHATSAPP =================
 async function start() {
     const { state, saveCreds } = await useMultiFileAuthState("auth");
 
@@ -46,33 +47,48 @@ async function start() {
             console.log("Closed:", code);
 
             if (code === DisconnectReason.loggedOut) {
-                console.log("Logged out - restart manually");
+                console.log("Logged out - تحتاج تسجيل جديد");
                 return;
             }
 
-            setTimeout(() => {
-                console.log("Reconnecting...");
-                start();
-            }, 10000);
+            setTimeout(start, 10000);
         }
     });
 }
 
-// ================= SEND =================
+// ================= SEND MESSAGE =================
 app.post("/send", async (req, res) => {
-    
-});
+    try {
+        const { groupId, image, caption } = req.body;
 
+        if (!sock || !isConnected) {
+            return res.status(500).json({ error: "not connected" });
+        }
+
+        await sock.sendMessage(groupId, {
+            image: { url: image },
+            caption: caption || ""
+        });
+
+        res.json({ ok: true });
+
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
 
 // ================= STATUS =================
 app.get("/status", (req, res) => {
     res.json({ connected: isConnected });
 });
 
+// ================= QR IMAGE =================
+app.get("/qr-image", (req, res) => {
+    if (!qrCodeImage) return res.send("QR not ready");
+    res.send(`<img src="${qrCodeImage}" style="width:300px"/>`);
+});
 
 // ================= QR PAGE =================
-
-// 👇 هذا الأول (صفحة HTML)
 app.get("/qr", (req, res) => {
     res.send(`
 <!DOCTYPE html>
@@ -120,15 +136,9 @@ setInterval(() => {
     `);
 });
 
+// ================= PORT =================
+const PORT = process.env.PORT || 3001;
 
-// 👇 هذا الثاني (الصورة نفسها)
-app.get("/qr-image", (req, res) => {
-    if (!qrCodeImage) return res.send("QR not ready");
-    res.send(`<img src="${qrCodeImage}" style="width:300px"/>`);
-});
-
-
-// ================= START SERVER =================
 app.listen(PORT, () => {
     console.log("WhatsApp service running on", PORT);
     start();
