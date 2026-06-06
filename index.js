@@ -58,7 +58,10 @@ async function start() {
         
 // ================= SEND =================
 app.post("/send", async (req, res) => {
-    console.log("INCOMING:", req.body);
+    try {
+        const { groupId, image, caption } = req.body;
+
+        console.log("INCOMING:", req.body);
 
         if (!sock || !isConnected) {
             return res.status(500).json({ error: "not connected" });
@@ -72,11 +75,11 @@ app.post("/send", async (req, res) => {
         res.json({ ok: true });
 
     } catch (e) {
+        console.log("ERROR:", e);
         res.status(500).json({ error: e.message });
     }
 });
-
-// QR
+        
 app.get("/qr", (req, res) => {
     if (!qrCodeImage) return res.send("QR not ready");
     res.send(`<img src="${qrCodeImage}"/>`);
