@@ -7,7 +7,7 @@ import cloudscraper
 app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
-NODE_URL = "http://localhost:3001/send"
+NODE_URL = "https://wa-bridge-8lia.onrender.com/send"
 GROUP_ID = "CxG1mLQR5VtGhiZaaAMqyI@g.us"
 
 # ================= DB =================
