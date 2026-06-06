@@ -32,6 +32,7 @@ async function start() {
 
         if (qr) {
             qrCodeImage = await qrcode.toDataURL(qr);
+            console.log("QR GENERATED");
         }
 
         if (connection === "open") {
@@ -82,10 +83,21 @@ app.get("/status", (req, res) => {
     res.json({ connected: isConnected });
 });
 
-// ================= QR IMAGE =================
+// ================= QR IMAGE (FIXED) =================
 app.get("/qr-image", (req, res) => {
-    if (!qrCodeImage) return res.send("QR not ready");
-    res.send(`<img src="${qrCodeImage}" style="width:300px"/>`);
+    if (!qrCodeImage) {
+        return res.status(404).send("no-qr");
+    }
+
+    const base64 = qrCodeImage.replace("data:image/png;base64,", "");
+    const img = Buffer.from(base64, "base64");
+
+    res.writeHead(200, {
+        "Content-Type": "image/png",
+        "Cache-Control": "no-store"
+    });
+
+    res.end(img);
 });
 
 // ================= QR PAGE =================
@@ -122,12 +134,12 @@ app.get("/qr", (req, res) => {
 <div class="box">
     <h2>📱 WhatsApp QR Login</h2>
     <p>امسح الكود لتسجيل الدخول</p>
-    <img id="qr" src="/qr-image" />
+    <img id="qr" src="/qr-image?t=1" />
 </div>
 
 <script>
 setInterval(() => {
-    document.getElementById("qr").src = "/qr-image?time=" + Date.now();
+    document.getElementById("qr").src = "/qr-image?t=" + Date.now();
 }, 3000);
 </script>
 
@@ -136,7 +148,7 @@ setInterval(() => {
     `);
 });
 
-// ================= PORT =================
+// ================= START SERVER =================
 const PORT = process.env.PORT || 3001;
 
 app.listen(PORT, () => {
