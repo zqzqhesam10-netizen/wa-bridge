@@ -1,57 +1,34 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
-const pino = require("pino");
 const express = require("express");
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason
+} = require("@whiskeysockets/baileys");
+
 const qrcode = require("qrcode");
+const pino = require("pino");
 
 const app = express();
+app.use(express.json());
 
+let sock;
 let qrCodeData = "";
 let isConnected = false;
 
-// ================= STATUS =================
-app.get("/status", (req, res) => {
-    res.json({
-        connected: isConnected,
-        hasQR: !!qrCodeData
-    });
-});
-
-// ================= QR PAGE =================
-app.get("/qr", async (req, res) => {
-    if (isConnected) return res.send("<h1>✅ تم الاتصال بالفعل</h1>");
-    if (!qrCodeData) return res.send("<h1>⏳ جاري تجهيز QR...</h1>");
-
-    const qrImage = await qrcode.toDataURL(qrCodeData);
-
-    res.send(`
-        <div style="text-align:center; padding-top:50px; font-family:Arial">
-            <h2>📱 امسح كود الواتساب</h2>
-            <img src="${qrImage}" style="width:280px;border:5px solid #25D366;border-radius:12px"/>
-        </div>
-    `);
-});
-
-// ================= START SERVER =================
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-    console.log("🚀 Server running on", PORT);
-});
-
-// ================= WHATSAPP CONNECTION =================
+// ================= START WHATSAPP =================
 async function start() {
-    const { state, saveCreds } = await useMultiFileAuthState("./auth_info");
+    const { state, saveCreds } = await useMultiFileAuthState("/tmp/auth_info");
 
-    const sock = makeWASocket({
+    sock = makeWASocket({
         auth: state,
         logger: pino({ level: "silent" }),
-        browser: ["WhatsApp Server", "Chrome", "125.0.0"]
+        browser: ["Render Server", "Chrome", "120.0.0"]
     });
 
     sock.ev.on("creds.update", saveCreds);
 
     sock.ev.on("connection.update", (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        const { connection, qr, lastDisconnect } = update;
 
         if (qr) {
             qrCodeData = qr;
@@ -59,7 +36,7 @@ async function start() {
         }
 
         if (connection === "open") {
-            console.log("✅ Connected");
+            console.log("✅ CONNECTED");
             isConnected = true;
             qrCodeData = "";
         }
@@ -68,7 +45,6 @@ async function start() {
             isConnected = false;
 
             const code = lastDisconnect?.error?.output?.statusCode;
-
             console.log("❌ Closed:", code);
 
             if (code !== DisconnectReason.loggedOut) {
@@ -78,4 +54,60 @@ async function start() {
     });
 }
 
-start();
+// ================= QR PAGE =================
+app.get("/qr", async (req, res) => {
+    if (isConnected) {
+        return res.send("<h1 style='color:green;text-align:center'>✅ تم الاتصال بالفعل</h1>");
+    }
+
+    if (!qrCodeData) {
+        return res.send("<h1 style='text-align:center'>⏳ جاري تجهيز QR...</h1>");
+    }
+
+    const img = await qrcode.toDataURL(qrCodeData);
+
+    res.send(`
+        <html>
+        <head>
+            <title>WhatsApp QR</title>
+        </head>
+        <body style="background:#111;color:white;text-align:center;padding-top:50px">
+            <h2>📱 امسح QR للربط</h2>
+            <img src="${img}" style="width:300px;border:5px solid #25D366;border-radius:12px"/>
+        </body>
+        </html>
+    `);
+});
+
+// ================= STATUS =================
+app.get("/status", (req, res) => {
+    res.json({
+        connected: isConnected,
+        hasQR: !!qrCodeData
+    });
+});
+
+// ================= SEND MESSAGE =================
+app.post("/send", async (req, res) => {
+    try {
+        const { groupId, text } = req.body;
+
+        if (!sock || !isConnected) {
+            return res.status(500).json({ error: "not connected" });
+        }
+
+        await sock.sendMessage(groupId, { text });
+
+        res.json({ ok: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ================= START SERVER =================
+const PORT = process.env.PORT || 10000;
+
+app.listen(PORT, () => {
+    console.log("🚀 Server running on", PORT);
+    start();
+});
