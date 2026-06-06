@@ -60,40 +60,76 @@ async function start() {
 
 // ================= SEND =================
 app.post("/send", async (req, res) => {
-    try {
-        const { groupId, image, caption } = req.body;
-
-        console.log("INCOMING:", req.body);
-
-        if (!sock || !isConnected) {
-            return res.status(500).json({ error: "not connected" });
-        }
-
-        await sock.sendMessage(groupId, {
-            image: { url: image },
-            caption: caption || ""
-        });
-
-        res.json({ ok: true });
-
-    } catch (e) {
-        console.log("ERROR:", e);
-        res.status(500).json({ error: e.message });
-    }
+   ...
 });
 
-app.get("/qr", (req, res) => {
-    if (!qrCodeImage) return res.send("QR not ready");
-    res.send(`<img src="${qrCodeImage}"/>`);
-});
 
+// ================= STATUS =================
 app.get("/status", (req, res) => {
     res.json({ connected: isConnected });
 });
 
-const PORT = process.env.PORT || 3001;
 
+// ================= QR PAGE =================
+
+// 👇 هذا الأول (صفحة HTML)
+app.get("/qr", (req, res) => {
+    res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WhatsApp QR</title>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            background: #111;
+            color: white;
+            text-align: center;
+            font-family: Arial;
+            padding-top: 50px;
+        }
+        img {
+            margin-top: 20px;
+            border: 5px solid #25D366;
+            border-radius: 12px;
+        }
+        .box {
+            background: #222;
+            padding: 20px;
+            display: inline-block;
+            border-radius: 12px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="box">
+    <h2>📱 WhatsApp QR Login</h2>
+    <p>امسح الكود لتسجيل الدخول</p>
+    <img id="qr" src="/qr-image" />
+</div>
+
+<script>
+setInterval(() => {
+    document.getElementById("qr").src = "/qr-image?time=" + Date.now();
+}, 3000);
+</script>
+
+</body>
+</html>
+    `);
+});
+
+
+// 👇 هذا الثاني (الصورة نفسها)
+app.get("/qr-image", (req, res) => {
+    if (!qrCodeImage) return res.send("QR not ready");
+    res.send(`<img src="${qrCodeImage}" style="width:300px"/>`);
+});
+
+
+// ================= START SERVER =================
 app.listen(PORT, () => {
     console.log("WhatsApp service running on", PORT);
-    start(); // 🔥 مهم جداً تشغيل واتساب هنا
+    start();
 });
