@@ -86,7 +86,7 @@ def send_to_whatsapp(image_url, caption):
 def home():
     return "Flask + WhatsApp Bridge Running"
 
-@app.route("/api/force_check")
+@app.route("/api/check_updates")
 def force_check():
     check_updates()
     return jsonify({"status": "done"})
