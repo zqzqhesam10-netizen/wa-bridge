@@ -70,9 +70,9 @@ def check_updates():
         if cur.fetchone():
             break
 
-        caption = f"📺 {title}"
+        msg = f"📺 {title}\n🔥 متاح الآن في الاستراحة!"
 
-        send_to_whatsapp(img_url, caption)
+        send_to_whatsapp(img_url, msg)
 
         cur.execute(
             "INSERT INTO messages(phone,message,sender,msg_time) VALUES('system',%s,'system',%s)",
