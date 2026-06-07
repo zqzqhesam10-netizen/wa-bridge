@@ -16,7 +16,7 @@ let sock;
 let isConnected = false;
 let qrCode = null;
 
-// ================= DB (OPTIONAL SAFE) =================
+// ================= DB =================
 let dbEnabled = false;
 let db;
 
@@ -38,6 +38,7 @@ async function initDB() {
 
         dbEnabled = true;
         console.log("✅ DB Connected");
+
     } catch (e) {
         console.log("⚠️ DB Disabled:", e.message);
     }
@@ -45,6 +46,7 @@ async function initDB() {
 
 // ================= WHATSAPP =================
 async function startBot() {
+
     await initDB();
 
     const { state, saveCreds } =
@@ -53,35 +55,46 @@ async function startBot() {
     sock = makeWASocket({
         auth: state,
         logger: pino({ level: "silent" }),
-        browser: ["Render Bot", "Chrome", "120"]
+        browser: ["Ubuntu", "Chrome", "120.0.0"]
     });
 
     sock.ev.on("creds.update", saveCreds);
 
-    sock.ev.on("connection.update", (update) => {
+    sock.ev.on("connection.update", async (update) => {
+
         const { connection, qr, lastDisconnect } = update;
 
         if (qr) {
             qrCode = qr;
-            console.log("📌 QR updated");
+            console.log("📌 QR Updated");
         }
 
         if (connection === "open") {
             isConnected = true;
             qrCode = null;
-            console.log("✅ Connected");
+            console.log("✅ WhatsApp Connected");
         }
 
         if (connection === "close") {
+
             isConnected = false;
 
-            const code = lastDisconnect?.error?.output?.statusCode;
+            const code =
+                lastDisconnect?.error?.output?.statusCode;
+
+            console.log("❌ Connection closed:", code);
 
             if (code !== DisconnectReason.loggedOut) {
-                console.log("🔄 Reconnecting...");
-                startBot();
+
+                console.log("🔄 Reconnecting in 10s...");
+
+                setTimeout(() => {
+                    startBot();
+                }, 10000);
+
             } else {
-                console.log("❌ Logged out");
+
+                console.log("❌ Logged Out");
             }
         }
     });
@@ -90,6 +103,7 @@ async function startBot() {
 startBot();
 
 // ================= ROUTES =================
+
 app.get("/", (req, res) => {
     res.send("🚀 WA Bridge Running");
 });
@@ -103,20 +117,36 @@ app.get("/status", (req, res) => {
 });
 
 app.get("/groups", async (req, res) => {
-    const groups = await sock.groupFetchAllParticipating();
 
-    const result = Object.keys(groups).map(id => ({
-        id,
-        name: groups[id].subject
-    }));
+    try {
 
-    res.json(result);
+        const groups =
+            await sock.groupFetchAllParticipating();
+
+        const result =
+            Object.keys(groups).map(id => ({
+                id,
+                name: groups[id].subject
+            }));
+
+        res.json(result);
+
+    } catch (e) {
+
+        res.status(500).json({
+            error: e.message
+        });
+    }
 });
 
 app.get("/qr", async (req, res) => {
-    if (!qrCode) return res.send("⏳ No QR yet");
 
-    const img = await qrcode.toDataURL(qrCode);
+    if (!qrCode) {
+        return res.send("⏳ No QR yet");
+    }
+
+    const img =
+        await qrcode.toDataURL(qrCode);
 
     res.send(`
         <div style="text-align:center;margin-top:50px">
@@ -126,9 +156,18 @@ app.get("/qr", async (req, res) => {
     `);
 });
 
+// ================= SEND TEXT / IMAGE =================
+
 app.post("/send", async (req, res) => {
+
     try {
-        const { groupId, text } = req.body;
+
+        const {
+            groupId,
+            text,
+            image,
+            caption
+        } = req.body;
 
         if (!sock || !isConnected) {
             return res.status(500).json({
@@ -136,17 +175,49 @@ app.post("/send", async (req, res) => {
             });
         }
 
-        await sock.sendMessage(groupId, { text });
+        if (image) {
 
-        res.json({ ok: true });
+            await sock.sendMessage(groupId, {
+                image: { url: image },
+                caption: caption || ""
+            });
+
+        } else {
+
+            await sock.sendMessage(groupId, {
+                text: text || ""
+            });
+        }
+
+        res.json({
+            ok: true
+        });
+
     } catch (e) {
-        res.status(500).json({ error: e.message });
+
+        console.log("SEND ERROR:", e);
+
+        res.status(500).json({
+            error: e.message
+        });
     }
 });
 
 // ================= SERVER =================
-const PORT = process.env.PORT || 10000;
+
+const PORT =
+    process.env.PORT || 10000;
 
 app.listen(PORT, () => {
     console.log("🚀 Server running on", PORT);
+});
+
+// ================= SAFETY =================
+
+process.on("uncaughtException", (err) => {
+    console.log("UNCAUGHT:", err);
+});
+
+process.on("unhandledRejection", (err) => {
+    console.log("REJECTION:", err);
 });
