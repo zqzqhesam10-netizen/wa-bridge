@@ -5,55 +5,77 @@ const {
     DisconnectReason
 } = require("@whiskeysockets/baileys");
 
-const qrcode = require("qrcode");
-const app = express();
+const { Pool } = require("pg");
 
+const app = express();
 app.use(express.json());
 
+// ================= DB =================
+const db = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+});
+
+// ================= STATE =================
 let sock;
-let qrCodeImage = null;
 let isConnected = false;
 
-/* ================= START WHATSAPP ================= */
+// ================= INIT DB =================
+async function initDB() {
+    await db.query(`
+        CREATE TABLE IF NOT EXISTS system_state (
+            id SERIAL PRIMARY KEY,
+            qr TEXT,
+            connected BOOLEAN DEFAULT FALSE,
+            updated_at TIMESTAMP DEFAULT NOW()
+        );
+    `);
+}
+initDB();
+
+// ================= START WHATSAPP =================
 async function start() {
-    const { state, saveCreds } = await useMultiFileAuthState("auth");
+    const { state, saveCreds } = await useMultiFileAuthState("./auth");
 
     sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
-        browser: ["Ubuntu", "Chrome", "120.0.0"]
+        browser: ["Render", "Chrome", "120"]
     });
 
     sock.ev.on("creds.update", saveCreds);
 
     sock.ev.on("connection.update", async (update) => {
-        const { connection, qr, lastDisconnect } = update;
+        const { connection, qr } = update;
 
+        // ================= QR =================
         if (qr) {
-            qrCodeImage = await qrcode.toDataURL(qr);
+            await db.query(`
+                INSERT INTO system_state (id, qr, connected)
+                VALUES (1, $1, false)
+                ON CONFLICT (id)
+                DO UPDATE SET qr = $1, connected = false, updated_at = NOW()
+            `, [qr]);
         }
 
+        // ================= CONNECTED =================
         if (connection === "open") {
             isConnected = true;
-            qrCodeImage = null;
+
+            await db.query(`
+                UPDATE system_state
+                SET connected = true, qr = NULL, updated_at = NOW()
+                WHERE id = 1
+            `);
 
             console.log("✅ WhatsApp Connected");
-
-            // 🔥 جلب الجروبات تلقائيًا عند الاتصال
-            const groups = await sock.groupFetchAllParticipating();
-
-            console.log("📌 GROUPS LIST:");
-            for (let id in groups) {
-                console.log(groups[id].subject + " => " + id);
-            }
         }
 
+        // ================= CLOSE =================
         if (connection === "close") {
             isConnected = false;
 
-            const code = lastDisconnect?.error?.output?.statusCode;
-
-            console.log("❌ Closed:", code);
+            const code = update.lastDisconnect?.error?.output?.statusCode;
 
             if (code !== DisconnectReason.loggedOut) {
                 setTimeout(start, 5000);
@@ -62,7 +84,7 @@ async function start() {
     });
 }
 
-/* ================= SEND MESSAGE ================= */
+// ================= SEND MESSAGE =================
 app.post("/send", async (req, res) => {
     try {
         const { groupId, text } = req.body;
@@ -71,42 +93,47 @@ app.post("/send", async (req, res) => {
             return res.status(500).json({ error: "not connected" });
         }
 
-        if (!groupId || !text) {
-            return res.status(400).json({ error: "missing data" });
-        }
-
         await sock.sendMessage(groupId, { text });
 
         res.json({ ok: true });
 
     } catch (e) {
-        console.log(e);
         res.status(500).json({ error: e.message });
     }
 });
 
-/* ================= STATUS ================= */
-app.get("/status", (req, res) => {
+// ================= GET STATUS =================
+app.get("/status", async (req, res) => {
+    const result = await db.query("SELECT * FROM system_state WHERE id=1");
+
     res.json({
         connected: isConnected,
-        hasQR: !!qrCodeImage
+        hasQR: result.rows[0]?.qr ? true : false
     });
 });
 
-/* ================= QR PAGE ================= */
+// ================= GET QR =================
 app.get("/qr", async (req, res) => {
-    if (isConnected) return res.send("<h1>✅ Connected</h1>");
-    if (!qrCodeImage) return res.send("<h1>⏳ Loading QR...</h1>");
+    const result = await db.query("SELECT qr FROM system_state WHERE id=1");
+
+    if (!result.rows.length || !result.rows[0].qr) {
+        return res.send("<h3>QR not ready</h3>");
+    }
+
+    const qr = result.rows[0].qr;
 
     res.send(`
-        <div style="text-align:center;margin-top:50px">
-            <h2>Scan QR Code</h2>
-            <img src="${qrCodeImage}" style="width:300px"/>
-        </div>
+        <html>
+        <body style="text-align:center;background:#111;color:#fff;padding-top:50px">
+            <h2>WhatsApp QR Login</h2>
+            <img width="300"
+                 src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${qr}" />
+        </body>
+        </html>
     `);
 });
 
-/* ================= START SERVER ================= */
+// ================= START SERVER =================
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
