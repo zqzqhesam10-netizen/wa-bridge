@@ -16,11 +16,15 @@ def db():
 
 # ================= SEND TO NODE =================
 def send_to_whatsapp(image, caption):
-    requests.post(NODE_URL, json={
-        "groupId": GROUP_ID,
-        "image": image,
-        "caption": caption
-    })
+    requests.post(
+        "https://wa-bridge-8lia.onrender.com/send",
+        json={
+            "groupId": "120363429067223078@g.us",
+            "image": image,
+            "caption": caption
+        },
+        timeout=60
+    )
 
 # ================= SCRAPER =================
 def check_updates():
