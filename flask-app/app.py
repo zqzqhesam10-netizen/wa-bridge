@@ -42,6 +42,7 @@ def check_updates():
 
     scraper = cloudscraper.create_scraper()
     res = scraper.get("https://tuktukhd.com/recent/", timeout=30)
+    res.encoding = 'utf-8'
 
     soup = BeautifulSoup(res.text, "html.parser")
     items = soup.find_all("a")
