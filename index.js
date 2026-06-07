@@ -102,6 +102,17 @@ app.get("/status", (req, res) => {
     });
 });
 
+app.get("/groups", async (req, res) => {
+    const groups = await sock.groupFetchAllParticipating();
+
+    const result = Object.keys(groups).map(id => ({
+        id,
+        name: groups[id].subject
+    }));
+
+    res.json(result);
+});
+
 app.get("/qr", async (req, res) => {
     if (!qrCode) return res.send("⏳ No QR yet");
 
