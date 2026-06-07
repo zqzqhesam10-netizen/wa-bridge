@@ -159,35 +159,20 @@ app.get("/qr", async (req, res) => {
 // ================= SEND TEXT / IMAGE =================
 
 app.post("/send", async (req, res) => {
-
     try {
 
         const {
             groupId,
-            text,
             image,
             caption
         } = req.body;
 
-        if (!sock || !isConnected) {
-            return res.status(500).json({
-                error: "not connected"
-            });
-        }
-
-        if (image) {
-
-            await sock.sendMessage(groupId, {
-                image: { url: image },
-                caption: caption || ""
-            });
-
-        } else {
-
-            await sock.sendMessage(groupId, {
-                text: text || ""
-            });
-        }
+        await sock.sendMessage(groupId, {
+            image: {
+                url: image
+            },
+            caption: caption || ""
+        });
 
         res.json({
             ok: true
@@ -195,7 +180,7 @@ app.post("/send", async (req, res) => {
 
     } catch (e) {
 
-        console.log("SEND ERROR:", e);
+        console.log(e);
 
         res.status(500).json({
             error: e.message
