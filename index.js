@@ -1,5 +1,4 @@
 const express = require("express");
-const { Pool } = require("pg");
 const qrcode = require("qrcode");
 const pino = require("pino");
 
@@ -12,72 +11,52 @@ const {
 const app = express();
 app.use(express.json());
 
-// ================= DB =================
-const db = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
-});
-
 // ================= STATE =================
 let sock;
 let isConnected = false;
 let qrCode = null;
 
-// ================= INIT DB =================
+// ================= DB (OPTIONAL SAFE) =================
+let dbEnabled = false;
+let db;
+
 async function initDB() {
-    await db.query(`
-        CREATE TABLE IF NOT EXISTS wa_session (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-    `);
+    try {
+        const { Pool } = require("pg");
 
-    console.log("✅ DB Ready");
-}
+        db = new Pool({
+            connectionString: process.env.DATABASE_URL,
+            ssl: { rejectUnauthorized: false }
+        });
 
-// ================= SAVE SESSION =================
-async function saveSession(key, value) {
-    await db.query(
-        `INSERT INTO wa_session(key, value)
-         VALUES($1,$2)
-         ON CONFLICT (key)
-         DO UPDATE SET value = EXCLUDED.value`,
-        [key, JSON.stringify(value)]
-    );
-}
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS wa_session (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+        `);
 
-// ================= LOAD SESSION =================
-async function loadSession(key) {
-    const res = await db.query(
-        `SELECT value FROM wa_session WHERE key=$1`,
-        [key]
-    );
-
-    if (res.rows.length) {
-        return JSON.parse(res.rows[0].value);
+        dbEnabled = true;
+        console.log("✅ DB Connected");
+    } catch (e) {
+        console.log("⚠️ DB Disabled:", e.message);
     }
-
-    return null;
 }
 
-// ================= WHATSAPP START =================
+// ================= WHATSAPP =================
 async function startBot() {
     await initDB();
 
-    const savedCreds = await loadSession("creds");
-
-    const { state, saveCreds } = await useMultiFileAuthState("auth");
+    const { state, saveCreds } =
+        await useMultiFileAuthState("auth_info");
 
     sock = makeWASocket({
-        auth: savedCreds || state,
+        auth: state,
         logger: pino({ level: "silent" }),
         browser: ["Render Bot", "Chrome", "120"]
     });
 
-    sock.ev.on("creds.update", async (creds) => {
-        saveCreds(creds);
-        await saveSession("creds", creds);
-    });
+    sock.ev.on("creds.update", saveCreds);
 
     sock.ev.on("connection.update", (update) => {
         const { connection, qr, lastDisconnect } = update;
@@ -90,15 +69,15 @@ async function startBot() {
         if (connection === "open") {
             isConnected = true;
             qrCode = null;
-            console.log("✅ WhatsApp Connected");
+            console.log("✅ Connected");
         }
 
         if (connection === "close") {
             isConnected = false;
 
-            const status = lastDisconnect?.error?.output?.statusCode;
+            const code = lastDisconnect?.error?.output?.statusCode;
 
-            if (status !== DisconnectReason.loggedOut) {
+            if (code !== DisconnectReason.loggedOut) {
                 console.log("🔄 Reconnecting...");
                 startBot();
             } else {
@@ -118,7 +97,8 @@ app.get("/", (req, res) => {
 app.get("/status", (req, res) => {
     res.json({
         connected: isConnected,
-        hasQR: !!qrCode
+        hasQR: !!qrCode,
+        db: dbEnabled
     });
 });
 
@@ -140,7 +120,9 @@ app.post("/send", async (req, res) => {
         const { groupId, text } = req.body;
 
         if (!sock || !isConnected) {
-            return res.status(500).json({ error: "not connected" });
+            return res.status(500).json({
+                error: "not connected"
+            });
         }
 
         await sock.sendMessage(groupId, { text });
@@ -151,7 +133,7 @@ app.post("/send", async (req, res) => {
     }
 });
 
-// ================= START SERVER =================
+// ================= SERVER =================
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
