@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 import requests, os, psycopg2
 from datetime import datetime
 from bs4 import BeautifulSoup
@@ -7,89 +7,95 @@ import cloudscraper
 app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
+
 NODE_URL = "https://wa-bridge-8lia.onrender.com/send"
 GROUP_ID = "120363429067223078@g.us"
+
 
 # ================= DB =================
 def db():
     return psycopg2.connect(DATABASE_URL)
 
+
 # ================= SEND TO NODE =================
 def send_to_whatsapp(image, caption):
-    requests.post(
-        "https://wa-bridge-8lia.onrender.com/send",
-        json={
-            "groupId": "120363429067223078@g.us",
-            "image": image,
-            "caption": caption
-        },
-        timeout=60
-    )
-
-# ================= SCRAPER =================
-from PIL import Image
-from io import BytesIO
-import tempfile
-import requests
-
-def send_to_whatsapp(image_url, caption):
 
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0"
-        }
-
-        r = requests.get(
-            image_url,
-            headers=headers,
+        requests.post(
+            NODE_URL,
+            json={
+                "groupId": GROUP_ID,
+                "image": image,
+                "caption": caption
+            },
             timeout=60
         )
-
-        img = Image.open(
-            BytesIO(r.content)
-        )
-
-        img = img.convert("RGB")
-
-        tmp = tempfile.NamedTemporaryFile(
-            suffix=".jpg",
-            delete=False
-        )
-
-        img.save(
-            tmp.name,
-            "JPEG",
-            quality=95
-        )
-
-        with open(tmp.name, "rb") as f:
-
-            requests.post(
-                "https://wa-bridge-8lia.onrender.com/send",
-                files={
-                    "image": f
-                },
-                data={
-                    "groupId": "120363429067223078@g.us",
-                    "caption": caption
-                },
-                timeout=120
-            )
-
-        os.remove(tmp.name)
-
     except Exception as e:
         print("SEND ERROR:", e)
+
+
+# ================= SCRAPER =================
+def check_updates():
+
+    conn = db()
+    cur = conn.cursor()
+
+    scraper = cloudscraper.create_scraper()
+    res = scraper.get("https://tuktukhd.com/recent/", timeout=30)
+
+    soup = BeautifulSoup(res.text, "html.parser")
+    items = soup.find_all("a")
+
+    sent = 0
+
+    for item in items:
+
+        if sent >= 5:
+            break
+
+        img = item.find("img")
+        if not img:
+            continue
+
+        title = item.get("title") or "جديد"
+        link = item.get("href")
+        img_url = img.get("data-src") or img.get("src")
+
+        if not link:
+            continue
+
+        # منع التكرار
+        cur.execute("SELECT 1 FROM messages WHERE message=%s", (link,))
+        if cur.fetchone():
+            break
+
+        caption = f"📺 {title}"
+
+        send_to_whatsapp(img_url, caption)
+
+        cur.execute(
+            "INSERT INTO messages(phone,message,sender,msg_time) VALUES('system',%s,'system',%s)",
+            (link, datetime.now().strftime("%H:%M"))
+        )
+
+        conn.commit()
+        sent += 1
+
+    cur.close()
+    conn.close()
+
 
 # ================= ROUTES =================
 @app.route("/")
 def home():
-    return "Flask + WhatsApp Bridge Running"
+    return "Flask + WA Bridge OK"
+
 
 @app.route("/api/check_updates")
 def force_check():
     check_updates()
     return jsonify({"status": "done"})
+
 
 @app.route("/api/clear_messages")
 def clear():
@@ -97,7 +103,10 @@ def clear():
     cur = conn.cursor()
     cur.execute("DELETE FROM messages")
     conn.commit()
+    cur.close()
+    conn.close()
     return "cleared"
+
 
 @app.route("/api/send_test")
 def test():
@@ -106,6 +115,7 @@ def test():
         "تجربة إرسال"
     )
     return "sent"
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
