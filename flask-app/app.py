@@ -8,7 +8,7 @@ app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 NODE_URL = "https://wa-bridge-8lia.onrender.com/send"
-GROUP_ID = "CxG1mLQR5VtGhiZaaAMqyI@g.us"
+GROUP_ID = "120363429067223078@g.us"
 
 # ================= DB =================
 def db():
