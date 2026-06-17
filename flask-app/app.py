@@ -102,11 +102,12 @@ def force_check():
 def clear():
     conn = db()
     cur = conn.cursor()
-    cur.execute("DELETE FROM messages")
+    # حذف الجدول بالكامل
+    cur.execute("DROP TABLE IF EXISTS messages")
     conn.commit()
     cur.close()
     conn.close()
-    return "cleared"
+    return "Table dropped and cleared"
 
 
 @app.route("/api/send_test")
