@@ -41,7 +41,7 @@ def check_updates():
     cur = conn.cursor()
 
     scraper = cloudscraper.create_scraper()
-    res = scraper.get("https://tuktukhd.com/recent/", timeout=30)
+    res = scraper.get("https://www.fasel-hd.cam/most_recent/", timeout=30)
     res.encoding = 'utf-8'
 
     soup = BeautifulSoup(res.text, "html.parser")
