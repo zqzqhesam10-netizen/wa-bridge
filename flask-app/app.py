@@ -8,26 +8,13 @@ app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-NODE_URL = "https://wa-bridge-8lia.onrender.com/send"
+NODE_URL = "https://wa-bridge-8iby.onrender.com"
 GROUP_ID = "120363429067223078@g.us"
 
 
 # ================= DB =================
 def db():
-    conn = psycopg2.connect(DATABASE_URL)
-    # التأكد من إنشاء الجدول إذا كان مفقوداً
-    with conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS messages (
-                id SERIAL PRIMARY KEY,
-                phone TEXT,
-                message TEXT,
-                sender TEXT,
-                msg_time TEXT
-            );
-        """)
-    conn.commit()
-    return conn
+    return psycopg2.connect(DATABASE_URL)
 
 
 # ================= SEND TO NODE =================
