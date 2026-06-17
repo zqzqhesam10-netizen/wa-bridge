@@ -14,7 +14,20 @@ GROUP_ID = "120363429067223078@g.us"
 
 # ================= DB =================
 def db():
-    return psycopg2.connect(DATABASE_URL)
+    conn = psycopg2.connect(DATABASE_URL)
+    # التأكد من إنشاء الجدول إذا كان مفقوداً
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                phone TEXT,
+                message TEXT,
+                sender TEXT,
+                msg_time TEXT
+            );
+        """)
+    conn.commit()
+    return conn
 
 
 # ================= SEND TO NODE =================
