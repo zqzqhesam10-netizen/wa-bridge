@@ -8,13 +8,34 @@ app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-NODE_URL = "https://wa-bridge-8iby.onrender.com/send"
+NODE_URL = "https://wa-bridge-8lia.onrender.com/send"
 GROUP_ID = "120363429067223078@g.us"
 
 
 # ================= DB =================
 def db():
     return psycopg2.connect(DATABASE_URL)
+
+
+# ================= INIT DB =================
+def init_db():
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id SERIAL PRIMARY KEY,
+            phone TEXT,
+            message TEXT,
+            sender TEXT,
+            msg_time TEXT
+        )
+    """)
+
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
 # ================= SEND TO NODE =================
@@ -102,12 +123,11 @@ def force_check():
 def clear():
     conn = db()
     cur = conn.cursor()
-    # حذف الجدول بالكامل
-    cur.execute("DROP TABLE IF EXISTS messages")
+    cur.execute("DELETE FROM messages")
     conn.commit()
     cur.close()
     conn.close()
-    return "Table dropped and cleared"
+    return "cleared"
 
 
 @app.route("/api/send_test")
@@ -120,4 +140,5 @@ def test():
 
 
 if __name__ == "__main__":
+    init_db()
     app.run(host="0.0.0.0", port=5000)
