@@ -1,10 +1,11 @@
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows;
-using System.Windows.Forms;
 using System.Windows.Threading;
 using HoverPeek.KafiaNet.Core;
 using HoverPeek.KafiaNet.UI;
+using WinForms = System.Windows.Forms;
+using WpfMessageBox = System.Windows.MessageBox;
 
 namespace HoverPeek.KafiaNet;
 
@@ -14,7 +15,7 @@ public partial class App : System.Windows.Application
     private HoverDetector? _hoverDetector;
     private ExplorerItemResolver? _resolver;
     private FlipOverlayWindow? _overlay;
-    private NotifyIcon? _tray;
+    private WinForms.NotifyIcon? _tray;
     private readonly DispatcherTimer _trackTimer = new() { Interval = TimeSpan.FromMilliseconds(120) };
     private bool _trackingBusy;
     private string? _currentPath;
@@ -35,15 +36,15 @@ public partial class App : System.Windows.Application
 
         _trackTimer.Tick += OnTrackTick;
 
-        _tray = new NotifyIcon
+        _tray = new WinForms.NotifyIcon
         {
             Icon = SystemIcons.Application,
             Visible = true,
             Text = "HoverPeek-KafiaNet"
         };
 
-        var menu = new ContextMenuStrip();
-        var exit = new ToolStripMenuItem("Exit HoverPeek-KafiaNet");
+        var menu = new WinForms.ContextMenuStrip();
+        var exit = new WinForms.ToolStripMenuItem("Exit HoverPeek-KafiaNet");
         exit.Click += (_, _) => Shutdown();
         menu.Items.Add(exit);
         _tray.ContextMenuStrip = menu;
@@ -55,7 +56,7 @@ public partial class App : System.Windows.Application
         }
         catch (Exception ex)
         {
-            MessageBox.Show(
+            WpfMessageBox.Show(
                 "HoverPeek-KafiaNet could not start the mouse hook.\n\n" + ex.Message,
                 "HoverPeek-KafiaNet",
                 MessageBoxButton.OK,
