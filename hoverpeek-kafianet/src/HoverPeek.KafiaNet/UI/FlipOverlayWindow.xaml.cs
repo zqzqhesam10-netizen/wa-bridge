@@ -37,6 +37,11 @@ public partial class FlipOverlayWindow : Window
         // Capture the Explorer item before the overlay covers it.
         _frontSnapshot = CaptureScreenRegion(item.Bounds);
 
+        // The folder face must be established before the 3D model is attached.
+        // This prevents the details/back face from ever being rendered first.
+        _rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, null);
+        _rotation.Angle = 180;
+
         // Mask the dark backdrop with details.png alpha:
         // transparent edges remain truly transparent, while the visible
         // card area never reveals the Explorer image underneath.
@@ -53,9 +58,6 @@ public partial class FlipOverlayWindow : Window
         BuildCard(_frontSnapshot, detailsImage, GetAspect(item.Bounds));
 
         // Start with the folder image facing the user, then flip to details.
-        _rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, null);
-        _rotation.Angle = 180;
-
         Show();
         UpdateNativeBounds(item.Bounds);
 
@@ -94,9 +96,9 @@ public partial class FlipOverlayWindow : Window
 
     private void BuildCard(BitmapImage? frontSnapshot, BitmapImage detailsImage, double aspect)
     {
-        _rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, null);
-        _rotation.Angle = 0;
-
+        // Do not reset the rotation here. ShowCard establishes the initial
+        // folder-facing angle before this model is attached to the viewport,
+        // and geometry rebuilds must preserve the current face.
         var halfHeight = 1.0;
         var halfWidth = halfHeight * aspect;
         var mesh = CreateMesh(halfWidth, halfHeight);
