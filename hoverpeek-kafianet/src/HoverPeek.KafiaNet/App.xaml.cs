@@ -30,7 +30,7 @@ public partial class App : System.Windows.Application
         _overlay.Hide();
 
         _mouseHook = new GlobalMouseHook();
-        _hoverDetector = new HoverDetector(_mouseHook, thresholdMs: 350, jitterPx: 6);
+        _hoverDetector = new HoverDetector(_mouseHook, thresholdMs: 180, jitterPx: 6);
         _hoverDetector.HoverStarted += OnHoverStarted;
         _hoverDetector.HoverEnded += OnHoverEnded;
 
@@ -74,6 +74,11 @@ public partial class App : System.Windows.Application
 
         var item = await Task.Run(() => resolver.ResolveAtPoint(x, y));
         if (item is not { IsDirectory: true })
+            return;
+
+        // Cursor movement inside the same folder should not restart the flip.
+        if (overlay.IsVisible &&
+            string.Equals(item.FullPath, _currentPath, StringComparison.OrdinalIgnoreCase))
             return;
 
         var details = await FlipOverlayWindow.LoadDetailsAsync(item.FullPath);
