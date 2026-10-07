@@ -19,6 +19,7 @@ public partial class FlipOverlayWindow : Window
 
     private readonly AxisAngleRotation3D _rotation = new(new Vector3D(0, 1, 0), 0);
     private readonly RotateTransform3D _rotateTransform;
+    private BitmapImage? _frontSnapshot;
     private BitmapImage? _detailsImage;
 
     public FlipOverlayWindow()
@@ -32,7 +33,13 @@ public partial class FlipOverlayWindow : Window
     public void ShowCard(ExplorerItemInfo item, BitmapImage detailsImage)
     {
         _detailsImage = detailsImage;
-        BuildCard(detailsImage, GetAspect(item.Bounds));
+
+        // Capture the Explorer item before the overlay covers it.
+        // This makes the front face visually identical to the actual
+        // folder/item rectangle instead of showing a placeholder color.
+        _frontSnapshot = CaptureScreenRegion(item.Bounds);
+
+        BuildCard(_frontSnapshot, detailsImage, GetAspect(item.Bounds));
 
         Show();
         UpdateNativeBounds(item.Bounds);
@@ -56,19 +63,19 @@ public partial class FlipOverlayWindow : Window
             return;
 
         UpdateNativeBounds(bounds);
-
-        if (_detailsImage != null)
-            RebuildGeometry(GetAspect(bounds));
+        RebuildGeometry(GetAspect(bounds));
     }
 
     public void HideCard()
     {
         _rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, null);
         _rotation.Angle = 0;
+        _frontSnapshot = null;
+        _detailsImage = null;
         Hide();
     }
 
-    private void BuildCard(BitmapImage detailsImage, double aspect)
+    private void BuildCard(BitmapImage? frontSnapshot, BitmapImage detailsImage, double aspect)
     {
         _rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, null);
         _rotation.Angle = 0;
@@ -77,32 +84,44 @@ public partial class FlipOverlayWindow : Window
         var halfWidth = halfHeight * aspect;
         var mesh = CreateMesh(halfWidth, halfHeight);
 
-        var frontBrush = new SolidColorBrush(System.Windows.Media.Color.FromArgb(245, 16, 20, 24));
-        frontBrush.Freeze();
-
-        var imageBrush = new ImageBrush(detailsImage)
+        Material frontMaterial;
+        if (frontSnapshot != null)
         {
-            Stretch = Stretch.UniformToFill,
+            var frontBrush = new ImageBrush(frontSnapshot)
+            {
+                Stretch = Stretch.Fill,
+                AlignmentX = AlignmentX.Center,
+                AlignmentY = AlignmentY.Center
+            };
+            frontBrush.Freeze();
+            frontMaterial = new EmissiveMaterial(frontBrush);
+        }
+        else
+        {
+            var fallbackBrush = new SolidColorBrush(
+                System.Windows.Media.Color.FromArgb(245, 16, 20, 24));
+            fallbackBrush.Freeze();
+            frontMaterial = new DiffuseMaterial(fallbackBrush);
+        }
+
+        var detailsBrush = new ImageBrush(detailsImage)
+        {
+            Stretch = Stretch.Fill,
             AlignmentX = AlignmentX.Center,
             AlignmentY = AlignmentY.Center
         };
-        imageBrush.Freeze();
+        detailsBrush.Freeze();
 
         var model = new GeometryModel3D
         {
             Geometry = mesh,
-            Material = new DiffuseMaterial(frontBrush),
-            BackMaterial = new DiffuseMaterial(imageBrush),
+            Material = frontMaterial,
+            BackMaterial = new EmissiveMaterial(detailsBrush),
             Transform = _rotateTransform
         };
 
         CardViewport.Children.Clear();
         CardViewport.Children.Add(new ModelVisual3D { Content = model });
-        CardViewport.Children.Add(new ModelVisual3D
-        {
-            Content = new AmbientLight(Colors.White)
-        });
-
         UpdateCamera();
     }
 
@@ -113,11 +132,12 @@ public partial class FlipOverlayWindow : Window
             visual.Content is not GeometryModel3D model)
         {
             if (_detailsImage != null)
-                BuildCard(_detailsImage, aspect);
+                BuildCard(_frontSnapshot, _detailsImage, aspect);
             return;
         }
 
-        model.Geometry = CreateMesh(aspect, 1.0);
+        var halfWidth = Math.Max(0.2, aspect);
+        model.Geometry = CreateMesh(halfWidth, 1.0);
         UpdateCamera();
     }
 
@@ -201,6 +221,49 @@ public partial class FlipOverlayWindow : Window
     private static double GetAspect(Rect bounds)
     {
         return Math.Max(0.2, bounds.Width / Math.Max(1.0, bounds.Height));
+    }
+
+    private static BitmapImage? CaptureScreenRegion(Rect bounds)
+    {
+        try
+        {
+            var x = (int)Math.Round(bounds.X);
+            var y = (int)Math.Round(bounds.Y);
+            var width = Math.Max(2, (int)Math.Round(bounds.Width));
+            var height = Math.Max(2, (int)Math.Round(bounds.Height));
+
+            using var bitmap = new System.Drawing.Bitmap(
+                width,
+                height,
+                System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+
+            using (var graphics = System.Drawing.Graphics.FromImage(bitmap))
+            {
+                graphics.CopyFromScreen(
+                    x,
+                    y,
+                    0,
+                    0,
+                    new System.Drawing.Size(width, height),
+                    System.Drawing.CopyPixelOperation.SourceCopy);
+            }
+
+            using var stream = new MemoryStream();
+            bitmap.Save(stream, System.Drawing.Imaging.ImageFormat.Png);
+            stream.Position = 0;
+
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.StreamSource = stream;
+            image.EndInit();
+            image.Freeze();
+            return image;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public static Task<BitmapImage?> LoadDetailsAsync(string folderPath)
