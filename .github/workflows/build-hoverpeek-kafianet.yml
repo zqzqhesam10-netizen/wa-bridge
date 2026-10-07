@@ -21,12 +21,18 @@ jobs:
       - name: Publish lightweight portable app
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $project = "hoverpeek-kafianet/src/HoverPeek.KafiaNet/HoverPeek.KafiaNet.csproj"
           $out = "$env:GITHUB_WORKSPACE/publish"
+
           dotnet publish $project -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true /p:DebugType=None /p:DebugSymbols=false -o $out
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          if (-not (Test-Path $out)) { throw "Publish output was not created." }
 
           New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE/artifacts" | Out-Null
           7z a -tzip -mx=9 "$env:GITHUB_WORKSPACE/artifacts/HoverPeek-KafiaNet-win-x64.zip" "$out/*"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload ZIP
         uses: actions/upload-artifact@v4
