@@ -10,6 +10,10 @@
         Background="Transparent"
         IsHitTestVisible="False">
     <Grid Background="Transparent" ClipToBounds="True">
+        <Image x:Name="FrontBackdrop"
+               Stretch="Fill"
+               Opacity="1"
+               IsHitTestVisible="False"/>
         <Viewport3D x:Name="CardViewport"
                     ClipToBounds="True"
                     IsHitTestVisible="False"/>
