@@ -17,7 +17,7 @@ public partial class FlipOverlayWindow : Window
 
     private readonly AxisAngleRotation3D _rotation = new(new Vector3D(0, 1, 0), 0);
     private readonly RotateTransform3D _rotateTransform;
-    private GeometryModel3D? _cardModel;
+    private BitmapImage? _detailsImage;
 
     public FlipOverlayWindow()
     {
@@ -29,7 +29,9 @@ public partial class FlipOverlayWindow : Window
 
     public void ShowCard(ExplorerItemInfo item, BitmapImage detailsImage)
     {
-        BuildCard(detailsImage);
+        _detailsImage = detailsImage;
+        BuildCard(detailsImage, GetAspect(item.Bounds));
+
         Show();
         UpdateNativeBounds(item.Bounds);
 
@@ -48,8 +50,13 @@ public partial class FlipOverlayWindow : Window
 
     public void UpdateBounds(Rect bounds)
     {
-        if (IsVisible)
-            UpdateNativeBounds(bounds);
+        if (!IsVisible)
+            return;
+
+        UpdateNativeBounds(bounds);
+
+        if (_detailsImage != null)
+            RebuildGeometry(GetAspect(bounds));
     }
 
     public void HideCard()
@@ -59,16 +66,62 @@ public partial class FlipOverlayWindow : Window
         Hide();
     }
 
-    private void BuildCard(BitmapImage detailsImage)
+    private void BuildCard(BitmapImage detailsImage, double aspect)
     {
         _rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, null);
         _rotation.Angle = 0;
 
-        var aspect = Math.Max(0.2, ActualHeight > 1 ? ActualWidth / ActualHeight : 1.0);
         var halfHeight = 1.0;
         var halfWidth = halfHeight * aspect;
+        var mesh = CreateMesh(halfWidth, halfHeight);
 
-        var mesh = new MeshGeometry3D
+        var frontBrush = new SolidColorBrush(Color.FromArgb(245, 16, 20, 24));
+        frontBrush.Freeze();
+
+        var imageBrush = new ImageBrush(detailsImage)
+        {
+            Stretch = Stretch.UniformToFill,
+            AlignmentX = AlignmentX.Center,
+            AlignmentY = AlignmentY.Center
+        };
+        imageBrush.Freeze();
+
+        var model = new GeometryModel3D
+        {
+            Geometry = mesh,
+            Material = new DiffuseMaterial(frontBrush),
+            BackMaterial = new DiffuseMaterial(imageBrush),
+            Transform = _rotateTransform
+        };
+
+        CardViewport.Children.Clear();
+        CardViewport.Children.Add(new ModelVisual3D { Content = model });
+        CardViewport.Children.Add(new ModelVisual3D
+        {
+            Content = new AmbientLight(Colors.White)
+        });
+
+        UpdateCamera();
+    }
+
+    private void RebuildGeometry(double aspect)
+    {
+        if (CardViewport.Children.Count == 0 ||
+            CardViewport.Children[0] is not ModelVisual3D visual ||
+            visual.Content is not GeometryModel3D model)
+        {
+            if (_detailsImage != null)
+                BuildCard(_detailsImage, aspect);
+            return;
+        }
+
+        model.Geometry = CreateMesh(aspect, 1.0);
+        UpdateCamera();
+    }
+
+    private static MeshGeometry3D CreateMesh(double halfWidth, double halfHeight)
+    {
+        return new MeshGeometry3D
         {
             Positions = new Point3DCollection
             {
@@ -83,30 +136,6 @@ public partial class FlipOverlayWindow : Window
             },
             TriangleIndices = new Int32Collection { 0, 1, 2, 0, 2, 3 }
         };
-
-        _cardModel = new GeometryModel3D
-        {
-            Geometry = mesh,
-            Material = new DiffuseMaterial(
-                new SolidColorBrush(Color.FromArgb(245, 16, 20, 24))),
-            BackMaterial = new DiffuseMaterial(
-                new ImageBrush(detailsImage)
-                {
-                    Stretch = Stretch.UniformToFill,
-                    AlignmentX = AlignmentX.Center,
-                    AlignmentY = AlignmentY.Center
-                }),
-            Transform = _rotateTransform
-        };
-
-        CardViewport.Children.Clear();
-        CardViewport.Children.Add(new ModelVisual3D { Content = _cardModel });
-        CardViewport.Children.Add(new ModelVisual3D
-        {
-            Content = new AmbientLight(Colors.White)
-        });
-
-        UpdateCamera();
     }
 
     private void UpdateCamera()
@@ -120,7 +149,7 @@ public partial class FlipOverlayWindow : Window
             Position = new Point3D(0, 0, 10),
             LookDirection = new Vector3D(0, 0, -10),
             UpDirection = new Vector3D(0, 1, 0),
-            Width = aspect * 2.1
+            Width = aspect * 2.0
         };
     }
 
@@ -165,6 +194,11 @@ public partial class FlipOverlayWindow : Window
                       WS_EX_TRANSPARENT |
                       WS_EX_LAYERED;
         SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(updated));
+    }
+
+    private static double GetAspect(Rect bounds)
+    {
+        return Math.Max(0.2, bounds.Width / Math.Max(1.0, bounds.Height));
     }
 
     public static Task<BitmapImage?> LoadDetailsAsync(string folderPath)
