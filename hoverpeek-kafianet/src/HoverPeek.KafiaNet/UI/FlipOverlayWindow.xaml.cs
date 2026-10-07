@@ -37,10 +37,11 @@ public partial class FlipOverlayWindow : Window
         // Capture the Explorer item before the overlay covers it.
         _frontSnapshot = CaptureScreenRegion(item.Bounds);
 
-        // The folder face must be established before the 3D model is attached.
-        // This prevents the details/back face from ever being rendered first.
+        // Face the real folder image first. The details image is the back face.
+        // Keeping the model at 0 degrees until the animation starts prevents
+        // details.png from being visible before the flip.
         _rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, null);
-        _rotation.Angle = 180;
+        _rotation.Angle = 0;
 
         // Mask the dark backdrop with details.png alpha:
         // transparent edges remain truly transparent, while the visible
@@ -65,9 +66,9 @@ public partial class FlipOverlayWindow : Window
             AxisAngleRotation3D.AngleProperty,
             new DoubleAnimation
             {
-                From = 180,
-                To = 360,
-                Duration = TimeSpan.FromMilliseconds(480),
+                From = 0,
+                To = 180,
+                Duration = TimeSpan.FromMilliseconds(360),
                 EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut },
                 FillBehavior = FillBehavior.HoldEnd
             },
@@ -96,9 +97,8 @@ public partial class FlipOverlayWindow : Window
 
     private void BuildCard(BitmapImage? frontSnapshot, BitmapImage detailsImage, double aspect)
     {
-        // Do not reset the rotation here. ShowCard establishes the initial
-        // folder-facing angle before this model is attached to the viewport,
-        // and geometry rebuilds must preserve the current face.
+        // Keep the angle established by ShowCard so the folder face is already
+        // visible when the model is attached, before the flip animation begins.
         var halfHeight = 1.0;
         var halfWidth = halfHeight * aspect;
         var mesh = CreateMesh(halfWidth, halfHeight);
