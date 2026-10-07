@@ -5,6 +5,7 @@ on:
     paths:
       - "hoverpeek-kafianet/**"
       - ".github/workflows/build-hoverpeek-kafianet.yml"
+  workflow_dispatch:
 
 jobs:
   build:
