@@ -5,6 +5,7 @@ using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Media.Media3D;
 using System.Windows.Interop;
+using HoverPeek.KafiaNet.Core;
 
 namespace HoverPeek.KafiaNet.UI;
 
