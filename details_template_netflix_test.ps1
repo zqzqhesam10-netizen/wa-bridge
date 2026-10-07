@@ -10,130 +10,173 @@ if (-not (Test-Path -LiteralPath $Template)) {
 }
 
 $src = [System.Drawing.Bitmap]::new($Template)
-$dst = [System.Drawing.Bitmap]::new(256, 256, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
 
 try {
-    $g = [System.Drawing.Graphics]::FromImage($dst)
-    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
-    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-    $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
-    $g.Clear([System.Drawing.Color]::Transparent)
+    # Work from the original icon itself so its folder silhouette,
+    # 3D depth, bevels and shadow are preserved.
+    $small = [System.Drawing.Bitmap]::new(48, 48, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $shade = [System.Drawing.Bitmap]::new(256, 256, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $out = [System.Drawing.Bitmap]::new(256, 256, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
 
-    # Use the original 1883 PNG ONLY as the folder silhouette/mask.
-    # Its artwork is never copied into the new front face.
-    $mask = [System.Drawing.Bitmap]::new(256, 256, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     try {
-        $mg = [System.Drawing.Graphics]::FromImage($mask)
-        $mg.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-        $mg.DrawImage($src, 0, 0, 256, 256)
-        $mg.Dispose()
+        $gs = [System.Drawing.Graphics]::FromImage($small)
+        $gs.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBilinear
+        $gs.DrawImage($src, 0, 0, 48, 48)
+        $gs.Dispose()
 
-        # Build a modern black -> charcoal -> restrained Netflix-red atmosphere.
-        $rect = [System.Drawing.Rectangle]::new(0, 0, 256, 256)
-        $grad = [System.Drawing.Drawing2D.LinearGradientBrush]::new(
-            $rect,
-            [System.Drawing.Color]::FromArgb(255, 8, 8, 10),
-            [System.Drawing.Color]::FromArgb(255, 55, 6, 12),
-            35
-        )
+        $gsh = [System.Drawing.Graphics]::FromImage($shade)
+        $gsh.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $gsh.DrawImage($small, 0, 0, 256, 256)
+        $gsh.Dispose()
 
-        # Derive transparency from the reference silhouette while painting a new surface.
-        $pixels = $mask.LockBits(
-            $rect,
+        $srcRect = [System.Drawing.Rectangle]::new(0, 0, $src.Width, $src.Height)
+        $dstRect = [System.Drawing.Rectangle]::new(0, 0, 256, 256)
+
+        $shadeData = $shade.LockBits(
+            $dstRect,
             [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
             [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
         )
+        $srcData = $src.LockBits(
+            $srcRect,
+            [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
+            [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+        )
+        $outData = $out.LockBits(
+            $dstRect,
+            [System.Drawing.Imaging.ImageLockMode]::WriteOnly,
+            [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+        )
 
-        $bytes = New-Object byte[] ($pixels.Stride * $pixels.Height)
-        [Runtime.InteropServices.Marshal]::Copy($pixels.Scan0, $bytes, 0, $bytes.Length)
-        $mask.UnlockBits($pixels)
-
-        $layer = [System.Drawing.Bitmap]::new(256, 256, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
         try {
-            $lg = [System.Drawing.Graphics]::FromImage($layer)
-            $lg.FillRectangle($grad, $rect)
-            $lg.Dispose()
-
-            $lp = $layer.LockBits(
-                $rect,
-                [System.Drawing.Imaging.ImageLockMode]::ReadWrite,
-                [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+            $shadeBytes = New-Object byte[] ($shadeData.Stride * $shade.Height)
+            [Runtime.InteropServices.Marshal]::Copy(
+                $shadeData.Scan0,
+                $shadeBytes,
+                0,
+                $shadeBytes.Length
             )
 
-            $stride = $lp.Stride
-            $outBytes = New-Object byte[] ($stride * 256)
-            [Runtime.InteropServices.Marshal]::Copy($lp.Scan0, $outBytes, 0, $outBytes.Length)
+            $srcBytes = New-Object byte[] ($srcData.Stride * $src.Height)
+            [Runtime.InteropServices.Marshal]::Copy(
+                $srcData.Scan0,
+                $srcBytes,
+                0,
+                $srcBytes.Length
+            )
 
-            # Replace layer alpha with reference silhouette alpha.
+            $outBytes = New-Object byte[] ($outData.Stride * $out.Height)
+
             for ($y = 0; $y -lt 256; $y++) {
+                $srcY = [Math]::Min(
+                    $src.Height - 1,
+                    [int](($y / 255.0) * ($src.Height - 1))
+                )
+
                 for ($x = 0; $x -lt 256; $x++) {
-                    $i = $y * $stride + ($x * 4)
-                    $mi = $y * $mask.Width * 4 + ($x * 4)
-                    $outBytes[$i + 3] = $bytes[$mi + 3]
+                    $shadeIndex = $y * $shadeData.Stride + ($x * 4)
+                    $srcX = [Math]::Min(
+                        $src.Width - 1,
+                        [int](($x / 255.0) * ($src.Width - 1))
+                    )
+                    $srcIndex = $srcY * $srcData.Stride + ($srcX * 4)
+                    $outIndex = $y * $outData.Stride + ($x * 4)
+
+                    # Coarse luminance keeps the original 3D lighting and
+                    # silhouette, but suppresses the 1883 artwork/details.
+                    $b0 = $shadeBytes[$shadeIndex]
+                    $g0 = $shadeBytes[$shadeIndex + 1]
+                    $r0 = $shadeBytes[$shadeIndex + 2]
+
+                    $lum = (0.2126 * $r0) + (0.7152 * $g0) + (0.0722 * $b0)
+                    $v = $lum / 255.0
+
+                    # Netflix-like black/charcoal base with restrained red.
+                    $redAccent = (1.0 - ($x / 255.0)) * 0.20 + ($y / 255.0) * 0.08
+
+                    $r = [Math]::Min(255, [int](7 + ($v * 38) + ($redAccent * 95)))
+                    $g = [Math]::Min(255, [int](8 + ($v * 30)))
+                    $b = [Math]::Min(255, [int](10 + ($v * 34)))
+
+                    # Preserve the exact original folder transparency/shadow.
+                    $a = $srcBytes[$srcIndex + 3]
+
+                    $outBytes[$outIndex] = $b
+                    $outBytes[$outIndex + 1] = $g
+                    $outBytes[$outIndex + 2] = $r
+                    $outBytes[$outIndex + 3] = $a
                 }
             }
 
-            [Runtime.InteropServices.Marshal]::Copy($outBytes, 0, $lp.Scan0, $outBytes.Length)
-            $layer.UnlockBits($lp)
-
-            # Add subtle red cinematic light to the layer before drawing it.
-            # Because the layer already carries the template alpha mask,
-            # the light cannot leak outside the folder silhouette.
-            $lg2 = [System.Drawing.Graphics]::FromImage($layer)
-            $glow = [System.Drawing.Drawing2D.LinearGradientBrush]::new(
-                [System.Drawing.Rectangle]::new(20, 15, 215, 120),
-                [System.Drawing.Color]::FromArgb(80, 229, 9, 20),
-                [System.Drawing.Color]::FromArgb(0, 229, 9, 20),
-                90
+            [Runtime.InteropServices.Marshal]::Copy(
+                $outBytes,
+                0,
+                $outData.Scan0,
+                $outBytes.Length
             )
-            $lg2.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceOver
-            $lg2.FillRectangle($glow, 20, 15, 215, 120)
-            $glow.Dispose()
-            $lg2.Dispose()
-
-            $g.DrawImageUnscaled($layer, 0, 0)
         }
         finally {
-            $layer.Dispose()
+            $shade.UnlockBits($shadeData)
+            $src.UnlockBits($srcData)
+            $out.UnlockBits($outData)
         }
 
-        $grad.Dispose()
+        # Test text only. The real TMDB data comes later.
+        $g = [System.Drawing.Graphics]::FromImage($out)
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
 
-        # Test typography only; real TMDB fields come later.
-        $titleFont = [System.Drawing.Font]::new("Arial", 19, [System.Drawing.FontStyle]::Bold)
-        $infoFont  = [System.Drawing.Font]::new("Arial", 11, [System.Drawing.FontStyle]::Regular)
-        $smallFont = [System.Drawing.Font]::new("Arial", 9, [System.Drawing.FontStyle]::Regular)
+        $titleFont = [System.Drawing.Font]::new(
+            "Arial",
+            19,
+            [System.Drawing.FontStyle]::Bold
+        )
+        $infoFont = [System.Drawing.Font]::new(
+            "Arial",
+            11,
+            [System.Drawing.FontStyle]::Regular
+        )
 
-        $white = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::White)
-        $gray  = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(215, 205, 205, 205))
-        $red   = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 229, 9, 20))
+        $shadowBrush = [System.Drawing.SolidBrush]::new(
+            [System.Drawing.Color]::FromArgb(180, 0, 0, 0)
+        )
+        $whiteBrush = [System.Drawing.SolidBrush]::new(
+            [System.Drawing.Color]::White
+        )
+        $redBrush = [System.Drawing.SolidBrush]::new(
+            [System.Drawing.Color]::FromArgb(255, 229, 9, 20)
+        )
 
-        $g.DrawString("TEST MOVIE", $titleFont, $white, 36, 112)
-        $g.DrawString("2026", $infoFont, $gray, 36, 148)
-        $g.DrawString("ACTION • SCI-FI", $infoFont, $gray, 36, 169)
-        $g.DrawString("UNITED STATES", $infoFont, $gray, 36, 190)
-        $g.DrawString("★ 7.5", $infoFont, $red, 36, 214)
-        $g.DrawString("TMDB", $smallFont, $gray, 202, 225)
+        $g.DrawString("TEST MOVIE", $titleFont, $shadowBrush, 34, 112)
+        $g.DrawString("TEST MOVIE", $titleFont, $whiteBrush, 32, 110)
 
-        $white.Dispose()
-        $gray.Dispose()
-        $red.Dispose()
+        $g.DrawString("2026  •  ACTION / SCI-FI", $infoFont, $whiteBrush, 34, 150)
+        $g.DrawString("UNITED STATES", $infoFont, $whiteBrush, 34, 171)
+
+        $g.DrawString("★ 7.5", $infoFont, $redBrush, 34, 198)
+
+        $shadowBrush.Dispose()
+        $whiteBrush.Dispose()
+        $redBrush.Dispose()
         $titleFont.Dispose()
         $infoFont.Dispose()
-        $smallFont.Dispose()
-
         $g.Dispose()
 
-        $dst.Save($Output, [System.Drawing.Imaging.ImageFormat]::Png)
+        $out.Save(
+            $Output,
+            [System.Drawing.Imaging.ImageFormat]::Png
+        )
+
         Write-Host "Created: $Output"
         Write-Host "Size: 256x256"
-        Write-Host "Reference: template.png used only as silhouette/mask."
+        Write-Host "Template geometry/shadow preserved; 1883 artwork suppressed."
     }
     finally {
-        $mask.Dispose()
+        $small.Dispose()
+        $shade.Dispose()
+        $out.Dispose()
     }
 }
 finally {
     $src.Dispose()
-    $dst.Dispose()
 }
