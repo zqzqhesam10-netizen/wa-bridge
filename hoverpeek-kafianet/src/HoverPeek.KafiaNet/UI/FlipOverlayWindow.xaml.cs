@@ -37,9 +37,17 @@ public partial class FlipOverlayWindow : Window
         // Capture the Explorer item before the overlay covers it.
         _frontSnapshot = CaptureScreenRegion(item.Bounds);
 
-        // The backdrop is intentionally a solid opaque surface.
-        // Never place the Explorer snapshot behind details.png, because
-        // transparent pixels in the details image must not reveal Explorer.
+        // Mask the dark backdrop with details.png alpha:
+        // transparent edges remain truly transparent, while the visible
+        // card area never reveals the Explorer image underneath.
+        var mask = new ImageBrush(detailsImage)
+        {
+            Stretch = Stretch.Fill,
+            AlignmentX = AlignmentX.Center,
+            AlignmentY = AlignmentY.Center
+        };
+        mask.Freeze();
+        CardBackdrop.OpacityMask = mask;
         CardBackdrop.Opacity = 1;
 
         BuildCard(_frontSnapshot, detailsImage, GetAspect(item.Bounds));
@@ -77,6 +85,7 @@ public partial class FlipOverlayWindow : Window
     {
         _rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, null);
         _rotation.Angle = 0;
+        CardBackdrop.OpacityMask = null;
         CardBackdrop.Opacity = 1;
         _frontSnapshot = null;
         _detailsImage = null;
