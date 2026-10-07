@@ -1,0 +1,17 @@
+<Window x:Class="HoverPeek.KafiaNet.UI.FlipOverlayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        AllowsTransparency="True"
+        ShowInTaskbar="False"
+        ShowActivated="False"
+        Topmost="True"
+        Background="Transparent"
+        IsHitTestVisible="False">
+    <Grid Background="Transparent" ClipToBounds="True">
+        <Viewport3D x:Name="CardViewport"
+                    ClipToBounds="True"
+                    IsHitTestVisible="False"/>
+    </Grid>
+</Window>
