@@ -37,10 +37,14 @@ public partial class FlipOverlayWindow : Window
         // Capture the Explorer item before the overlay covers it.
         _frontSnapshot = CaptureScreenRegion(item.Bounds);
 
+        // Keep an opaque copy of the original Explorer rectangle behind
+        // the rotating 3D face so the live Explorer window never bleeds
+        // through during the edge-on part of the animation.
+        FrontBackdrop.Source = _frontSnapshot;
+
         BuildCard(_frontSnapshot, detailsImage, GetAspect(item.Bounds));
 
-        // 180° is the normal-facing orientation for the captured Explorer face.
-        // We then continue to 360° so the Details image becomes the visible back face.
+        // Start with the folder image facing the user, then flip to details.
         _rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, null);
         _rotation.Angle = 180;
 
@@ -73,6 +77,7 @@ public partial class FlipOverlayWindow : Window
     {
         _rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, null);
         _rotation.Angle = 0;
+        FrontBackdrop.Source = null;
         _frontSnapshot = null;
         _detailsImage = null;
         Hide();
