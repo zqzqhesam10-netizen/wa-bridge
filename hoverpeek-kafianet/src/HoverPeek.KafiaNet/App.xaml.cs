@@ -30,7 +30,7 @@ public partial class App : System.Windows.Application
         _overlay.Hide();
 
         _mouseHook = new GlobalMouseHook();
-        _hoverDetector = new HoverDetector(_mouseHook, thresholdMs: 180, jitterPx: 6);
+        _hoverDetector = new HoverDetector(_mouseHook, thresholdMs: 120, jitterPx: 6);
         _hoverDetector.HoverStarted += OnHoverStarted;
         _hoverDetector.HoverEnded += OnHoverEnded;
 
