@@ -37,10 +37,10 @@ public partial class FlipOverlayWindow : Window
         // Capture the Explorer item before the overlay covers it.
         _frontSnapshot = CaptureScreenRegion(item.Bounds);
 
-        // Keep an opaque copy of the original Explorer rectangle behind
-        // the rotating 3D face so the live Explorer window never bleeds
-        // through during the edge-on part of the animation.
-        FrontBackdrop.Source = _frontSnapshot;
+        // The backdrop is intentionally a solid opaque surface.
+        // Never place the Explorer snapshot behind details.png, because
+        // transparent pixels in the details image must not reveal Explorer.
+        CardBackdrop.Opacity = 1;
 
         BuildCard(_frontSnapshot, detailsImage, GetAspect(item.Bounds));
 
@@ -77,7 +77,7 @@ public partial class FlipOverlayWindow : Window
     {
         _rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, null);
         _rotation.Angle = 0;
-        FrontBackdrop.Source = null;
+        CardBackdrop.Opacity = 1;
         _frontSnapshot = null;
         _detailsImage = null;
         Hide();
