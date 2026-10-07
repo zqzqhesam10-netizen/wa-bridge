@@ -1,3 +1,4 @@
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Media;
@@ -76,7 +77,7 @@ public partial class FlipOverlayWindow : Window
         var halfWidth = halfHeight * aspect;
         var mesh = CreateMesh(halfWidth, halfHeight);
 
-        var frontBrush = new SolidColorBrush(Color.FromArgb(245, 16, 20, 24));
+        var frontBrush = new SolidColorBrush(System.Windows.Media.Color.FromArgb(245, 16, 20, 24));
         frontBrush.Freeze();
 
         var imageBrush = new ImageBrush(detailsImage)
