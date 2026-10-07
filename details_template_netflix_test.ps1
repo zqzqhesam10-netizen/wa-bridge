@@ -76,6 +76,21 @@ try {
             [Runtime.InteropServices.Marshal]::Copy($outBytes, 0, $lp.Scan0, $outBytes.Length)
             $layer.UnlockBits($lp)
 
+            # Add subtle red cinematic light to the layer before drawing it.
+            # Because the layer already carries the template alpha mask,
+            # the light cannot leak outside the folder silhouette.
+            $lg2 = [System.Drawing.Graphics]::FromImage($layer)
+            $glow = [System.Drawing.Drawing2D.LinearGradientBrush]::new(
+                [System.Drawing.Rectangle]::new(20, 15, 215, 120),
+                [System.Drawing.Color]::FromArgb(80, 229, 9, 20),
+                [System.Drawing.Color]::FromArgb(0, 229, 9, 20),
+                90
+            )
+            $lg2.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceOver
+            $lg2.FillRectangle($glow, 20, 15, 215, 120)
+            $glow.Dispose()
+            $lg2.Dispose()
+
             $g.DrawImageUnscaled($layer, 0, 0)
         }
         finally {
@@ -83,16 +98,6 @@ try {
         }
 
         $grad.Dispose()
-
-        # Subtle cinematic red light on the upper/front area.
-        $glow = [System.Drawing.Drawing2D.LinearGradientBrush]::new(
-            [System.Drawing.Rectangle]::new(20, 15, 215, 120),
-            [System.Drawing.Color]::FromArgb(80, 229, 9, 20),
-            [System.Drawing.Color]::FromArgb(0, 229, 9, 20),
-            90
-        )
-        $g.FillRectangle($glow, 20, 15, 215, 120)
-        $glow.Dispose()
 
         # Test typography only; real TMDB fields come later.
         $titleFont = [System.Drawing.Font]::new("Arial", 19, [System.Drawing.FontStyle]::Bold)
