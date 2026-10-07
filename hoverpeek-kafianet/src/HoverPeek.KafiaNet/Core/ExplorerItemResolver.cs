@@ -1,5 +1,4 @@
-using System.Windows.Automation;
-
+using System.IO;
 namespace HoverPeek.KafiaNet.Core;
 
 public sealed class ExplorerItemResolver
