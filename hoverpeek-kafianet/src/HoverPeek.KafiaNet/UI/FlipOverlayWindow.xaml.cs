@@ -35,11 +35,14 @@ public partial class FlipOverlayWindow : Window
         _detailsImage = detailsImage;
 
         // Capture the Explorer item before the overlay covers it.
-        // This makes the front face visually identical to the actual
-        // folder/item rectangle instead of showing a placeholder color.
         _frontSnapshot = CaptureScreenRegion(item.Bounds);
 
         BuildCard(_frontSnapshot, detailsImage, GetAspect(item.Bounds));
+
+        // 180° is the normal-facing orientation for the captured Explorer face.
+        // We then continue to 360° so the Details image becomes the visible back face.
+        _rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, null);
+        _rotation.Angle = 180;
 
         Show();
         UpdateNativeBounds(item.Bounds);
@@ -48,8 +51,8 @@ public partial class FlipOverlayWindow : Window
             AxisAngleRotation3D.AngleProperty,
             new DoubleAnimation
             {
-                From = 0,
-                To = 180,
+                From = 180,
+                To = 360,
                 Duration = TimeSpan.FromMilliseconds(480),
                 EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut },
                 FillBehavior = FillBehavior.HoldEnd
@@ -91,7 +94,8 @@ public partial class FlipOverlayWindow : Window
             {
                 Stretch = Stretch.Fill,
                 AlignmentX = AlignmentX.Center,
-                AlignmentY = AlignmentY.Center
+                AlignmentY = AlignmentY.Center,
+                RelativeTransform = new ScaleTransform(-1, 1, 0.5, 0.5)
             };
             frontBrush.Freeze();
             frontMaterial = new EmissiveMaterial(frontBrush);
