@@ -17,7 +17,7 @@ public sealed class HoverDetector : IDisposable
     public event Action<int, int>? HoverStarted;
     public event Action? HoverEnded;
 
-    public HoverDetector(GlobalMouseHook mouseHook, int thresholdMs = 350, int jitterPx = 6)
+    public HoverDetector(GlobalMouseHook mouseHook, int thresholdMs = 180, int jitterPx = 6)
     {
         _mouseHook = mouseHook ?? throw new ArgumentNullException(nameof(mouseHook));
         _thresholdMs = thresholdMs;
@@ -48,7 +48,10 @@ public sealed class HoverDetector : IDisposable
             _anchorX = x;
             _anchorY = y;
 
-            var wasHovering = _hoverFired;
+            // Movement does not mean leaving the hovered folder.
+            // Explorer bounds are checked by App.OnTrackTick, which knows
+            // the actual current item. Keep the overlay alive while the
+            // cursor moves within that same item.
             _hoverFired = false;
 
             _cts?.Cancel();
@@ -57,9 +60,6 @@ public sealed class HoverDetector : IDisposable
             var token = _cts.Token;
 
             _ = FireAfterDelay(x, y, token);
-
-            if (wasHovering)
-                HoverEnded?.Invoke();
         }
     }
 
