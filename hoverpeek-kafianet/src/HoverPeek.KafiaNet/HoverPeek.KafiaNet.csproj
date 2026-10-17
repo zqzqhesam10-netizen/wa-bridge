@@ -2,11 +2,13 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFrameworks>net8.0-windows;net48</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationManifest Condition="'$(TargetFramework)' == 'net8.0-windows'">app.manifest</ApplicationManifest>
+    <ApplicationManifest Condition="'$(TargetFramework)' == 'net48'">app.win7.manifest</ApplicationManifest>
     <AssemblyName>HoverPeek-KafiaNet</AssemblyName>
     <RootNamespace>HoverPeek.KafiaNet</RootNamespace>
     <Version>1.0.0</Version>
