@@ -19,7 +19,8 @@
     <DebugType>None</DebugType>
     <DebugSymbols>false</DebugSymbols>
     <EnableCompressionInSingleFile Condition="'$(TargetFramework)' == 'net8.0-windows'">false</EnableCompressionInSingleFile>
-    <PlatformTarget>x64</PlatformTarget>
+    <PlatformTarget Condition="'$(TargetFramework)' == 'net8.0-windows'">x64</PlatformTarget>
+    <PlatformTarget Condition="'$(TargetFramework)' == 'net48'">AnyCPU</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
 </Project>
