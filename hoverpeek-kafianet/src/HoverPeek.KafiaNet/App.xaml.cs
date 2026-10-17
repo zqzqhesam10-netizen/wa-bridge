@@ -152,7 +152,7 @@ public partial class App : System.Windows.Application
 
     private static void SetAutoStart(bool enabled)
     {
-        var executablePath = Environment.ProcessPath;
+        var executablePath = GetExecutablePath();
         if (string.IsNullOrWhiteSpace(executablePath) || !File.Exists(executablePath))
             throw new InvalidOperationException("The running executable path could not be determined.");
 
