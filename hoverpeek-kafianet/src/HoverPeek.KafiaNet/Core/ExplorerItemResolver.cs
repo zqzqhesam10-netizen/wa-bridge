@@ -1,5 +1,7 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows.Automation;
+
 namespace HoverPeek.KafiaNet.Core;
 
 public sealed class ExplorerItemResolver
@@ -7,7 +9,9 @@ public sealed class ExplorerItemResolver
     private int _cachedWindowHandle;
     private string? _cachedFolderPath;
     private DateTime _cachedAt;
-    private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(2);
+
+    // Explorer may navigate within the same HWND. Keep this cache short to avoid stale parent paths.
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromMilliseconds(300);
 
     public ExplorerItemInfo? ResolveAtPoint(int screenX, int screenY)
     {
@@ -30,17 +34,34 @@ public sealed class ExplorerItemResolver
             if (string.IsNullOrWhiteSpace(folderPath))
                 return null;
 
-            var fullPath = Path.Combine(folderPath, name);
-            var isDirectory = Directory.Exists(fullPath);
-            if (!isDirectory && !File.Exists(fullPath))
+            // With "file name extensions" hidden, UI Automation can return "Folder"
+            // even though the real filesystem entry is "Folder.lnk".
+            var displayedPath = FindDisplayedPath(folderPath, name);
+            if (displayedPath == null)
                 return null;
+
+            var resolvedPath = displayedPath;
+            var isDirectory = Directory.Exists(displayedPath);
+
+            // Resolve filesystem folder shortcuts to their target for the details.png lookup.
+            // Bounds remain those of the visible .lnk item in Explorer.
+            if (!isDirectory &&
+                string.Equals(Path.GetExtension(displayedPath), ".lnk", StringComparison.OrdinalIgnoreCase))
+            {
+                var target = TryResolveDirectoryShortcut(displayedPath);
+                if (!string.IsNullOrWhiteSpace(target))
+                {
+                    resolvedPath = target;
+                    isDirectory = true;
+                }
+            }
 
             var bounds = item.Current.BoundingRectangle;
             if (bounds.IsEmpty || bounds.Width < 2 || bounds.Height < 2)
                 return null;
 
             return new ExplorerItemInfo(
-                fullPath,
+                resolvedPath,
                 new System.Windows.Rect(bounds.X, bounds.Y, bounds.Width, bounds.Height),
                 isDirectory);
         }
@@ -51,6 +72,85 @@ public sealed class ExplorerItemResolver
         catch
         {
             return null;
+        }
+    }
+
+    private static string? FindDisplayedPath(string parentPath, string displayName)
+    {
+        try
+        {
+            var directPath = Path.Combine(parentPath, displayName);
+            if (Directory.Exists(directPath) || File.Exists(directPath))
+                return directPath;
+
+            if (!displayName.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase))
+            {
+                var shortcutPath = Path.Combine(parentPath, displayName + ".lnk");
+                if (File.Exists(shortcutPath))
+                    return shortcutPath;
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
+    }
+
+    private static string? TryResolveDirectoryShortcut(string shortcutPath)
+    {
+        object? shell = null;
+        object? shortcut = null;
+
+        try
+        {
+            var shellType = Type.GetTypeFromProgID("WScript.Shell");
+            if (shellType == null)
+                return null;
+
+            shell = Activator.CreateInstance(shellType);
+            if (shell == null)
+                return null;
+
+            dynamic shellObject = shell;
+            shortcut = shellObject.CreateShortcut(shortcutPath);
+            if (shortcut == null)
+                return null;
+
+            dynamic shortcutObject = shortcut;
+            object? rawTarget = shortcutObject.TargetPath;
+            var targetPath = rawTarget as string;
+            if (string.IsNullOrWhiteSpace(targetPath))
+                return null;
+
+            targetPath = Environment.ExpandEnvironmentVariables(targetPath.Trim().Trim('"'));
+
+            if (!Path.IsPathRooted(targetPath))
+            {
+                var shortcutDirectory = Path.GetDirectoryName(shortcutPath);
+                if (string.IsNullOrWhiteSpace(shortcutDirectory))
+                    return null;
+
+                targetPath = Path.GetFullPath(targetPath, shortcutDirectory);
+            }
+            else
+            {
+                targetPath = Path.GetFullPath(targetPath);
+            }
+
+            return Directory.Exists(targetPath) ? targetPath : null;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            if (shortcut != null && Marshal.IsComObject(shortcut))
+                Marshal.FinalReleaseComObject(shortcut);
+
+            if (shell != null && Marshal.IsComObject(shell))
+                Marshal.FinalReleaseComObject(shell);
         }
     }
 
