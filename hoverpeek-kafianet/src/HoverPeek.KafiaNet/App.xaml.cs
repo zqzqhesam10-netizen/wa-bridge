@@ -176,7 +176,8 @@ public partial class App : System.Windows.Application
         if (enabled)
         {
             var fullPath = Path.GetFullPath(executablePath);
-            runKey.SetValue(AutoStartValueName, $"\\"{fullPath}\\"", RegistryValueKind.String);
+            var command = string.Concat((char)34, fullPath, (char)34);
+            runKey.SetValue(AutoStartValueName, command, RegistryValueKind.String);
         }
         else
         {
