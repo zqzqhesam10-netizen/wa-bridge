@@ -18,6 +18,19 @@ public partial class App : System.Windows.Application
     private const string AutoStartValueName = "HoverPeek-KafiaNet";
     private const string AutoStartPreferenceName = "StartWithWindows";
 
+    private static string? GetExecutablePath()
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.GetCurrentProcess();
+            return process.MainModule?.FileName;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private GlobalMouseHook? _mouseHook;
     private HoverDetector? _hoverDetector;
     private ExplorerItemResolver? _resolver;
@@ -113,7 +126,7 @@ public partial class App : System.Windows.Application
     {
         try
         {
-            var executablePath = Environment.ProcessPath;
+            var executablePath = GetExecutablePath();
             if (string.IsNullOrWhiteSpace(executablePath) || !File.Exists(executablePath))
                 return false;
 
