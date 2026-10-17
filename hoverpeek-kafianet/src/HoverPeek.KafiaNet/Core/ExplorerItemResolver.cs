@@ -131,7 +131,7 @@ public sealed class ExplorerItemResolver
                 if (string.IsNullOrWhiteSpace(shortcutDirectory))
                     return null;
 
-                targetPath = Path.GetFullPath(targetPath, shortcutDirectory);
+                targetPath = Path.GetFullPath(Path.Combine(shortcutDirectory, targetPath));
             }
             else
             {
