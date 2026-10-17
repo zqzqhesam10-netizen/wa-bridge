@@ -14,31 +14,52 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET 8
+      - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
 
-      - name: Publish lightweight portable app
+      - name: Publish Windows 10+ build (.NET 8)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $project = "hoverpeek-kafianet/src/HoverPeek.KafiaNet/HoverPeek.KafiaNet.csproj"
-          $out = "$env:GITHUB_WORKSPACE/publish"
+          $out = "$env:GITHUB_WORKSPACE/publish-win10"
 
-          dotnet publish $project -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true /p:DebugType=None /p:DebugSymbols=false -o $out
+          dotnet publish $project -c Release -f net8.0-windows -r win-x64 --self-contained false /p:PublishSingleFile=true /p:DebugType=None /p:DebugSymbols=false -o $out
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          if (-not (Test-Path $out)) { throw "Publish output was not created." }
+          if (-not (Test-Path "$out/HoverPeek-KafiaNet.exe")) { throw "Windows 10+ executable was not created." }
 
           New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE/artifacts" | Out-Null
           7z a -tzip -mx=9 "$env:GITHUB_WORKSPACE/artifacts/HoverPeek-KafiaNet-win-x64.zip" "$out/*"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Upload ZIP
+      - name: Publish Windows 7 build (.NET Framework 4.8)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $project = "hoverpeek-kafianet/src/HoverPeek.KafiaNet/HoverPeek.KafiaNet.csproj"
+          $out = "$env:GITHUB_WORKSPACE/publish-win7"
+
+          dotnet publish $project -c Release -f net48 /p:PublishSingleFile=false /p:DebugType=None /p:DebugSymbols=false -o $out
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path "$out/HoverPeek-KafiaNet.exe")) { throw "Windows 7 executable was not created." }
+
+          7z a -tzip -mx=9 "$env:GITHUB_WORKSPACE/artifacts/HoverPeek-KafiaNet-Windows7-net48.zip" "$out/*"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows 10+ ZIP
         uses: actions/upload-artifact@v4
         with:
           name: HoverPeek-KafiaNet-win-x64
           path: artifacts/HoverPeek-KafiaNet-win-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Windows 7 ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: HoverPeek-KafiaNet-Windows7-net48
+          path: artifacts/HoverPeek-KafiaNet-Windows7-net48.zip
           if-no-files-found: error
           retention-days: 30
