@@ -212,7 +212,7 @@ public partial class FlipOverlayWindow : Window
         SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height,
             SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
 
-        var dpi = GetDpiForWindow(hwnd);
+        var dpi = GetWindowDpi(hwnd);
         if (dpi > 0)
         {
             Width = width * 96.0 / dpi;
@@ -236,6 +236,20 @@ public partial class FlipOverlayWindow : Window
                       WS_EX_TRANSPARENT |
                       WS_EX_LAYERED;
         SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(updated));
+    }
+
+    private static uint GetWindowDpi(IntPtr hwnd)
+    {
+        try
+        {
+            return GetDpiForWindow(hwnd);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            // Windows 7 has no GetDpiForWindow API. The legacy manifest
+            // DPI setting uses the 96-DPI fallback for this overlay sizing path.
+            return 96;
+        }
     }
 
     private static double GetAspect(Rect bounds)
