@@ -23,4 +23,7 @@
     <PlatformTarget Condition="'$(TargetFramework)' == 'net48'">AnyCPU</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <Reference Include="Microsoft.CSharp" />
+  </ItemGroup>
 </Project>
