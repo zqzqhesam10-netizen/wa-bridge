@@ -2,6 +2,7 @@ from flask import Flask, jsonify
 import requests, os, psycopg2
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from bs4 import BeautifulSoup
@@ -13,7 +14,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/").strip()
+SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/feed/").strip()
 
 
 # ================= DB =================
@@ -137,10 +138,280 @@ def get_series_details(scraper, url):
         return [], ""
 
 
+def _local_name(tag):
+    return tag.rsplit("}", 1)[-1].split(":")[-1]
+
+
+def _child_text(parent, wanted_name):
+    for child in list(parent):
+        if _local_name(child.tag) == wanted_name:
+            return "".join(child.itertext()).strip()
+    return ""
+
+
+def _normalized_url_key(url):
+    if not url:
+        return ""
+    parsed = urlparse(url.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return url.strip().rstrip("/").lower()
+    normalized = parsed._replace(fragment="")
+    return normalized.geturl().rstrip("/").lower()
+
+
+def _image_from_html(markup, base_url):
+    if not markup:
+        return None
+    soup = BeautifulSoup(markup, "html.parser")
+    for node in soup.find_all(["img", "source"]):
+        for attr in ("data-src", "data-lazy-src", "data-original", "data-original-src", "src"):
+            candidate = node.get(attr)
+            if candidate and candidate.strip() and not candidate.strip().startswith("data:"):
+                return urljoin(base_url, candidate.strip())
+        srcset = node.get("srcset")
+        if srcset:
+            candidate = srcset.split(",")[0].strip().split(" ")[0]
+            if candidate and not candidate.startswith("data:"):
+                return urljoin(base_url, candidate)
+    return None
+
+
+def _rss_image(item, base_url):
+    # Prefer per-item Media RSS thumbnails/content, then image enclosures.
+    for element in item.iter():
+        local = _local_name(element.tag).lower()
+        image_url = (element.attrib.get("url") or "").strip()
+        if not image_url:
+            continue
+        media_type = (element.attrib.get("type") or "").lower()
+        medium = (element.attrib.get("medium") or "").lower()
+        is_media_rss = "search.yahoo.com/mrss" in element.tag.lower()
+        if local == "thumbnail":
+            return urljoin(base_url, image_url)
+        if local == "content" and is_media_rss:
+            if medium == "video" or media_type.startswith("video/"):
+                continue
+            if medium == "image" or media_type.startswith("image/") or not media_type:
+                return urljoin(base_url, image_url)
+        if local == "enclosure" and (media_type.startswith("image/") or not media_type):
+            return urljoin(base_url, image_url)
+    return None
+
+
+def _parse_source_response(response, source_url):
+    """Normalize RSS/Atom, public WordPress REST JSON, or legacy HTML into source items."""
+    response.raise_for_status()
+    body = response.text or ""
+    lower = body[:5000].lower()
+    challenge_markers = (
+        "just a moment...",
+        "enable javascript and cookies to continue",
+        "checking your browser",
+        "cf-chl-",
+        "challenge-platform"
+    )
+    if any(marker in lower for marker in challenge_markers):
+        raise RuntimeError("Source returned a browser/Cloudflare challenge page, not content.")
+
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    start = body.lstrip()[:200].lower()
+    items = []
+
+    if (
+        "rss+xml" in content_type
+        or "atom+xml" in content_type
+        or "xml" in content_type
+        or start.startswith("<?xml")
+        or start.startswith("<rss")
+        or start.startswith("<feed")
+    ):
+        root = ET.fromstring(response.content)
+        root_type = _local_name(root.tag).lower()
+        if root_type == "rss":
+            source_entries = [
+                node for node in root.iter()
+                if _local_name(node.tag).lower() == "item"
+            ]
+            source_format = "rss"
+        elif root_type == "feed":
+            source_entries = [
+                node for node in root.iter()
+                if _local_name(node.tag).lower() == "entry"
+            ]
+            source_format = "atom"
+        else:
+            raise RuntimeError("The source returned XML, but it is not an RSS/Atom feed.")
+
+        for entry in source_entries:
+            title = _child_text(entry, "title")
+            link = _child_text(entry, "link")
+            if not link:
+                # Atom uses <link href="..."> rather than text content.
+                for element in entry:
+                    if _local_name(element.tag).lower() == "link":
+                        rel = (element.attrib.get("rel") or "alternate").lower()
+                        if rel == "alternate" and element.attrib.get("href"):
+                            link = element.attrib["href"].strip()
+                            break
+            if not link:
+                link = _child_text(entry, "guid") or _child_text(entry, "id")
+            link = urljoin(source_url, link.strip()) if link else ""
+
+            description = _child_text(entry, "description")
+            encoded = _child_text(entry, "encoded")
+            content = _child_text(entry, "content")
+            metadata_html = encoded or content or description
+            image_url = _rss_image(entry, source_url) or _image_from_html(metadata_html, link or source_url)
+            clean_title = BeautifulSoup(title, "html.parser").get_text(" ", strip=True)
+            items.append({
+                "title": clean_title or "جديد",
+                "link": link,
+                "image": image_url,
+                "html": metadata_html,
+                "source_format": source_format
+            })
+        return items, source_format
+
+    if "json" in content_type or start.startswith("[") or start.startswith("{"):
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise RuntimeError("The JSON source response is not a list of posts.")
+        for post in payload:
+            if not isinstance(post, dict):
+                continue
+            raw_title = post.get("title", "")
+            title = raw_title.get("rendered", "") if isinstance(raw_title, dict) else str(raw_title or "")
+            raw_content = post.get("content", "")
+            content_html = raw_content.get("rendered", "") if isinstance(raw_content, dict) else str(raw_content or "")
+            raw_excerpt = post.get("excerpt", "")
+            excerpt_html = raw_excerpt.get("rendered", "") if isinstance(raw_excerpt, dict) else str(raw_excerpt or "")
+            embedded = post.get("_embedded") or {}
+            media = embedded.get("wp:featuredmedia") or []
+            image_url = None
+            if media and isinstance(media[0], dict):
+                image_url = media[0].get("source_url")
+            link = str(post.get("link") or post.get("guid", {}).get("rendered", "") or "")
+            items.append({
+                "title": BeautifulSoup(title, "html.parser").get_text(" ", strip=True) or "جديد",
+                "link": link,
+                "image": image_url or _image_from_html(content_html or excerpt_html, link or source_url),
+                "html": content_html or excerpt_html,
+                "source_format": "json",
+                "post_id": post.get("id")
+            })
+        return items, "json"
+
+    # Compatibility fallback for an unchallenged HTML listing if SOURCE_URL is deliberately configured to one.
+    if "html" in content_type or "<html" in start or "<!doctype html" in start:
+        soup = BeautifulSoup(body, "html.parser")
+        for anchor in soup.find_all("a"):
+            img = anchor.find("img")
+            if not img:
+                continue
+            raw_link = anchor.get("href")
+            if not raw_link:
+                continue
+            link = urljoin(source_url, raw_link.strip())
+            image_url = _image_from_html(str(img), link)
+            if not image_url:
+                continue
+            title = anchor.get("title") or img.get("alt") or anchor.get_text(" ", strip=True) or "جديد"
+            items.append({
+                "title": BeautifulSoup(title, "html.parser").get_text(" ", strip=True),
+                "link": link,
+                "image": image_url,
+                "html": str(anchor),
+                "source_format": "html"
+            })
+        return items, "html"
+
+    raise RuntimeError(f"Unsupported source content type: {content_type or 'unknown'}")
+
+
+def _enrich_missing_images(items, scraper, source_url):
+    """Use the public WordPress API only to enrich entries already present in the selected feed."""
+    missing = [item for item in items if item.get("link") and not item.get("image")]
+    if not missing:
+        return
+    parsed = urlparse(source_url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return
+    api_url = f"{parsed.scheme}://{parsed.netloc}/wp-json/wp/v2/posts?per_page=100&_embed=1"
+    try:
+        response = scraper.get(api_url, timeout=12)
+        if not response.ok:
+            return
+        posts = response.json()
+        if not isinstance(posts, list):
+            return
+        by_url = {}
+        by_title = {}
+        for post in posts:
+            if not isinstance(post, dict):
+                continue
+            post_url = str(post.get("link") or "")
+            guid = post.get("guid") or {}
+            guid_url = guid.get("rendered", "") if isinstance(guid, dict) else str(guid or "")
+            embedded = post.get("_embedded") or {}
+            media = embedded.get("wp:featuredmedia") or []
+            image_url = media[0].get("source_url") if media and isinstance(media[0], dict) else None
+            raw_title = post.get("title") or {}
+            title_html = raw_title.get("rendered", "") if isinstance(raw_title, dict) else str(raw_title or "")
+            title = BeautifulSoup(title_html, "html.parser").get_text(" ", strip=True).casefold()
+            raw_content = post.get("content") or {}
+            content_html = raw_content.get("rendered", "") if isinstance(raw_content, dict) else str(raw_content or "")
+            if image_url:
+                for key in (_normalized_url_key(post_url), _normalized_url_key(guid_url)):
+                    if key:
+                        by_url[key] = (image_url, content_html)
+                if title:
+                    by_title[title] = (image_url, content_html)
+        for item in missing:
+            match = by_url.get(_normalized_url_key(item.get("link", "")))
+            if not match:
+                title_key = str(item.get("title") or "").strip().casefold()
+                match = by_title.get(title_key)
+            if match:
+                item["image"] = match[0]
+                if not item.get("html"):
+                    item["html"] = match[1]
+        response.close()
+    except Exception as exc:
+        print("SOURCE IMAGE ENRICHMENT WARNING:", f"{type(exc).__name__}: {exc}", flush=True)
+
+
+def _extract_series_metadata(markup):
+    genres = []
+    country = ""
+    if not markup:
+        return genres, country
+    soup = BeautifulSoup(markup, "html.parser")
+    for li in soup.find_all("li"):
+        text = li.get_text(" ", strip=True)
+        if text.startswith("الانواع"):
+            genres = [
+                a.get_text(" ", strip=True)
+                for a in li.find_all("a")
+                if a.get_text(" ", strip=True)
+            ]
+            break
+    for li in soup.find_all("li"):
+        text = li.get_text(" ", strip=True)
+        if text.startswith("دولة المسلسل"):
+            links = li.find_all("a")
+            if links:
+                country = links[0].get_text(" ", strip=True)
+            else:
+                country = text.replace("دولة المسلسل", "", 1).strip()
+            break
+    return genres, country
+
+
 def check_updates():
     result = {
         "status": "starting",
         "source": SOURCE_URL,
+        "source_format": None,
         "final_url": None,
         "response_content_type": None,
         "response_server": None,
@@ -149,6 +420,7 @@ def check_updates():
         "node_url_configured": bool(NODE_URL),
         "source_http_status": None,
         "anchors_found": 0,
+        "items_found": 0,
         "candidates_found": 0,
         "attempts": 0,
         "sent": 0,
@@ -193,93 +465,76 @@ def check_updates():
                 }, ensure_ascii=False),
                 flush=True
             )
-        response.raise_for_status()
+            response.raise_for_status()
 
-        body_lower = response.text.lower()
-        challenge_markers = (
-            "just a moment...",
-            "checking your browser",
-            "cf-chl-",
-            "challenge-platform"
-        )
-        if any(marker in body_lower for marker in challenge_markers):
-            raise RuntimeError("TukTukHD returned a browser/Cloudflare challenge page, not the recent-items page")
-
-        soup = BeautifulSoup(response.text, "html.parser")
-        items = soup.find_all("a")
+        items, source_format = _parse_source_response(response, result["source"])
+        result["source_format"] = source_format
+        result["items_found"] = len(items)
         result["anchors_found"] = len(items)
+        _enrich_missing_images(items, scraper, result["source"])
+        response.close()
 
         if not items:
             result["status"] = "no_candidates"
-            result["errors"].append("The source page returned no links; inspect the response HTML/source availability.")
+            result["errors"].append("The source was reachable, but the selected feed contained no parseable items.")
+        else:
+            for item in items:
+                if result["attempts"] >= 5:
+                    break
 
-        for item in items:
-            if result["attempts"] >= 5:
-                break
+                link = (item.get("link") or "").strip()
+                if not link:
+                    result["skipped_missing_link"] += 1
+                    continue
 
-            img = item.find("img")
-            if not img:
-                continue
+                # Feed entries are newest-first: stop at the first known link before checking image availability.
+                cur.execute("SELECT 1 FROM messages WHERE message=%s LIMIT 1", (link,))
+                if cur.fetchone():
+                    result["duplicate_stop"] = True
+                    break
 
-            raw_link = item.get("href")
-            if not raw_link:
-                result["skipped_missing_link"] += 1
-                continue
+                image_url = (item.get("image") or "").strip()
+                if not image_url:
+                    result["skipped_missing_image"] += 1
+                    continue
 
-            link = urljoin(result["source"], raw_link.strip())
-            raw_image = (
-                img.get("data-src")
-                or img.get("data-lazy-src")
-                or img.get("data-original")
-                or img.get("src")
-            )
-            if not raw_image:
-                result["skipped_missing_image"] += 1
-                continue
+                result["candidates_found"] += 1
+                title = (item.get("title") or "جديد").strip()
+                genres, country = _extract_series_metadata(item.get("html") or "")
+                genre_text = "، ".join(genres) if genres else "غير محدد"
+                country_text = country if country else "غير محدد"
+                caption = (
+                    f"📺 {title}\n"
+                    f"🎭 النوع: {genre_text}\n"
+                    f"🌍 الدولة: {country_text}\n"
+                    f"🔥 متاح الآن في الاستراحة!"
+                )
 
-            image_url = urljoin(link, raw_image.strip())
-            result["candidates_found"] += 1
+                result["attempts"] += 1
+                ok, details = send_to_whatsapp(image_url, caption)
+                result["send_results"].append({
+                    "title": title,
+                    "link": link,
+                    "accepted": bool(ok),
+                    "details": details
+                })
 
-            cur.execute("SELECT 1 FROM messages WHERE message=%s LIMIT 1", (link,))
-            if cur.fetchone():
-                result["duplicate_stop"] = True
-                break
+                if not ok:
+                    result["failed"] += 1
+                    continue
 
-            title = (item.get("title") or img.get("alt") or "جديد").strip()
-            genres, country = get_series_details(scraper, link)
-            genre_text = "، ".join(genres) if genres else "غير محدد"
-            country_text = country if country else "غير محدد"
-            caption = (
-                f"📺 {title}\n"
-                f"🎭 النوع: {genre_text}\n"
-                f"🌍 الدولة: {country_text}\n"
-                f"🔥 متاح الآن في الاستراحة!"
-            )
-
-            result["attempts"] += 1
-            ok, details = send_to_whatsapp(image_url, caption)
-            result["send_results"].append({
-                "title": title,
-                "accepted": bool(ok),
-                "details": details
-            })
-
-            if not ok:
-                result["failed"] += 1
-                continue
-
-            cur.execute(
-                "INSERT INTO messages(phone,message,sender,msg_time) VALUES('system',%s,'system',%s)",
-                (link, datetime.now().strftime("%H:%M"))
-            )
-            conn.commit()
-            result["sent"] += 1
+                cur.execute(
+                    "INSERT INTO messages(phone,message,sender,msg_time) VALUES('system',%s,'system',%s)",
+                    (link, datetime.now().strftime("%H:%M"))
+                )
+                conn.commit()
+                result["sent"] += 1
 
         if result["failed"]:
             result["status"] = "partial" if result["sent"] else "send_failed"
         elif result["sent"]:
             result["status"] = "done"
-        elif result["status"] != "no_candidates":
+        elif result["status"] not in ("no_candidates", "error"):
             result["status"] = "no_new_items" if result["duplicate_stop"] else "no_candidates"
 
     except Exception as e:
@@ -369,7 +624,7 @@ def _probe_public_source(url):
 
 
 def diagnose_public_sources():
-    """Probe common public feed/API endpoints; this function never sends WhatsApp messages."""
+    """Probe common public feed/API endpoints and inspect source items without sending messages."""
     parsed = urlparse(SOURCE_URL)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return {
@@ -396,19 +651,75 @@ def diagnose_public_sources():
             probes[futures[future]] = future.result()
 
     usable = [p["url"] for p in probes if p and p["usable_feed_or_json_candidate"]]
+    source_inspection = {
+        "url": SOURCE_URL,
+        "format": None,
+        "http_status": None,
+        "items_found": 0,
+        "items_with_images": 0,
+        "sample_items": [],
+        "error": None
+    }
+    try:
+        response = requests.get(
+            SOURCE_URL,
+            timeout=12,
+            allow_redirects=True,
+            headers={
+                "User-Agent": "WA-Bridge-Source-Diagnostic/1.0",
+                "Accept": "application/rss+xml, application/atom+xml, application/json, application/xml, text/xml, text/html;q=0.8, */*;q=0.5"
+            }
+        )
+        source_inspection["http_status"] = response.status_code
+        response.encoding = "utf-8"
+        items, source_format = _parse_source_response(response, SOURCE_URL)
+        source_inspection["format"] = source_format
+        source_inspection["items_found"] = len(items)
+        if source_format in ("rss", "atom") and any(not item.get("image") for item in items):
+            _enrich_missing_images(items, cloudscraper.create_scraper(), SOURCE_URL)
+        source_inspection["items_with_images"] = sum(1 for item in items if item.get("image"))
+        source_inspection["sample_items"] = [
+            {
+                "title": item.get("title"),
+                "link": item.get("link"),
+                "has_image": bool(item.get("image"))
+            }
+            for item in items[:8]
+        ]
+        response.close()
+    except Exception as exc:
+        source_inspection["error"] = f"{type(exc).__name__}: {exc}"
+
+    if source_inspection["items_found"] and source_inspection["items_with_images"]:
+        next_step = (
+            "The source parser found feed items and image URLs. This diagnostic is read-only. "
+            "Call /api/check_updates only once to test delivery; it may send up to 5 new items."
+        )
+    elif source_inspection["items_found"]:
+        next_step = (
+            "The source parser found items but no image URLs. Do not call /api/check_updates yet; "
+            "inspect the sample items and image fields first."
+        )
+    elif usable:
+        next_step = (
+            "Public RSS/Atom or JSON endpoints are reachable, but the configured SOURCE_URL did not parse into items. "
+            "Set SOURCE_URL to https://tuktukcinemas.com/recent/feed/ and redeploy."
+        )
+    else:
+        next_step = (
+            "No unchallenged public RSS/Atom or JSON endpoint was confirmed. Do not bypass Cloudflare; "
+            "request an official feed/API or ask the site administrator to permit this service."
+        )
+
     return {
         "status": "diagnostic_complete",
         "source": SOURCE_URL,
         "message_sending": False,
         "probes": probes,
         "usable_feed_or_json_candidates": usable,
-        "next_step": (
-            "A public RSS/Atom or JSON endpoint is accessible; select and implement it as a source."
-            if usable else
-            "No unchallenged public RSS/Atom or JSON endpoint was confirmed. Do not bypass Cloudflare; request an official feed/API or ask the site administrator to permit this service."
-        )
+        "source_inspection": source_inspection,
+        "next_step": next_step
     }
-
 
 # ================= ROUTES =================
 @app.route("/")
