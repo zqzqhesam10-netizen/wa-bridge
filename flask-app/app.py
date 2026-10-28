@@ -1,7 +1,8 @@
 from flask import Flask, jsonify
 import requests, os, psycopg2
 from datetime import datetime
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from bs4 import BeautifulSoup
 import cloudscraper
@@ -302,10 +303,123 @@ def check_updates():
     return result
 
 
+# ================= READ-ONLY SOURCE DIAGNOSTICS =================
+def _probe_public_source(url):
+    """Test a fixed public URL without CloudScraper and without sending messages."""
+    details = {
+        "url": url,
+        "final_url": None,
+        "http_status": None,
+        "content_type": None,
+        "server": None,
+        "challenge_detected": False,
+        "format_guess": "unknown",
+        "publicly_reachable": False,
+        "usable_feed_or_json_candidate": False,
+        "body_excerpt": None,
+        "error": None
+    }
+    try:
+        response = requests.get(
+            url,
+            timeout=8,
+            allow_redirects=True,
+            headers={
+                "User-Agent": "WA-Bridge-Source-Diagnostic/1.0",
+                "Accept": "application/rss+xml, application/atom+xml, application/json, application/xml, text/xml, text/html;q=0.8, */*;q=0.5"
+            }
+        )
+        details["final_url"] = response.url
+        details["http_status"] = response.status_code
+        details["content_type"] = response.headers.get("Content-Type")
+        details["server"] = response.headers.get("Server")
+        body = response.text or ""
+        lower = body[:5000].lower()
+        challenge_markers = (
+            "just a moment...",
+            "enable javascript and cookies to continue",
+            "checking your browser",
+            "cf-chl-",
+            "challenge-platform"
+        )
+        details["challenge_detected"] = any(token in lower for token in challenge_markers)
+        details["body_excerpt"] = body[:180].replace("\\r", " ").replace("\\n", " ").strip()
+        content_type = (details["content_type"] or "").lower()
+        body_start = body.lstrip()[:200].lower()
+
+        if details["challenge_detected"]:
+            details["format_guess"] = "cloudflare_challenge"
+        elif "rss+xml" in content_type or "atom+xml" in content_type or "<rss" in body_start or "<feed" in body_start or "<rdf:rdf" in body_start:
+            details["format_guess"] = "rss_or_atom"
+        elif "json" in content_type or body_start.startswith("[") or body_start.startswith("{"):
+            details["format_guess"] = "json"
+        elif "xml" in content_type or body_start.startswith("<?xml"):
+            details["format_guess"] = "xml"
+        elif "html" in content_type or "<html" in body_start or "<!doctype html" in body_start:
+            details["format_guess"] = "html"
+
+        details["publicly_reachable"] = 200 <= response.status_code < 300 and not details["challenge_detected"]
+        details["usable_feed_or_json_candidate"] = (
+            details["publicly_reachable"] and details["format_guess"] in ("rss_or_atom", "json")
+        )
+        response.close()
+    except Exception as exc:
+        details["error"] = f"{type(exc).__name__}: {exc}"
+    return details
+
+
+def diagnose_public_sources():
+    """Probe common public feed/API endpoints; this function never sends WhatsApp messages."""
+    parsed = urlparse(SOURCE_URL)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return {
+            "status": "invalid_source_url",
+            "source": SOURCE_URL,
+            "message_sending": False,
+            "probes": [],
+            "error": "SOURCE_URL must be an absolute HTTP(S) URL"
+        }
+
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    urls = [
+        SOURCE_URL,
+        urljoin(origin, "/feed/"),
+        urljoin(origin, "/recent/feed/"),
+        urljoin(origin, "/wp-json/wp/v2/posts?per_page=3&_embed=1"),
+        urljoin(origin, "/wp-sitemap.xml")
+    ]
+    unique_urls = list(dict.fromkeys(urls))
+    probes = [None] * len(unique_urls)
+    with ThreadPoolExecutor(max_workers=min(5, len(unique_urls))) as pool:
+        futures = {pool.submit(_probe_public_source, url): index for index, url in enumerate(unique_urls)}
+        for future in as_completed(futures):
+            probes[futures[future]] = future.result()
+
+    usable = [p["url"] for p in probes if p and p["usable_feed_or_json_candidate"]]
+    return {
+        "status": "diagnostic_complete",
+        "source": SOURCE_URL,
+        "message_sending": False,
+        "probes": probes,
+        "usable_feed_or_json_candidates": usable,
+        "next_step": (
+            "A public RSS/Atom or JSON endpoint is accessible; select and implement it as a source."
+            if usable else
+            "No unchallenged public RSS/Atom or JSON endpoint was confirmed. Do not bypass Cloudflare; request an official feed/API or ask the site administrator to permit this service."
+        )
+    }
+
+
 # ================= ROUTES =================
 @app.route("/")
 def home():
     return "Flask + WA Bridge OK"
+
+
+@app.route("/api/source_diagnostic")
+def source_diagnostic():
+    # Read-only: probes public endpoints and never sends WhatsApp messages.
+    return jsonify(diagnose_public_sources()), 200
 
 
 @app.route("/api/check_updates")
