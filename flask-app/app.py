@@ -15,7 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-29-public-api-metadata-6"
+APP_CODE_VERSION = "2026-10-29-public-api-metadata-7"
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/feed/").strip()
 
 # Canonicalize a legacy environment value that still points at the Cloudflare-protected HTML page.
@@ -829,18 +829,10 @@ def check_updates(max_items=5):
                 result["candidates_found"] += 1
                 title = (item.get("title") or "جديد").strip()
                 metadata_html = item.get("html") or ""
+                # Use the public WordPress API data first. The theme page is Cloudflare-blocked
+                # (HTTP 403), so do not stall polling by retrying an endpoint known to be inaccessible.
                 genres, country, year = _metadata_from_public_post(item)
-                detail_status = "not_needed"
-                if not genres or not country or not year:
-                    detail_genres, detail_country, detail_year, detail_html, detail_status = get_series_details(
-                        scraper, link
-                    )
-                    genres = genres or detail_genres
-                    country = country or detail_country
-                    year = year or detail_year
-                    if detail_html:
-                        metadata_html = detail_html
-
+                detail_status = "public_api_only_page_blocked"
                 year = year or _extract_year(title=title, url=link, markup=metadata_html)
                 genre_text = "، ".join(genres) if genres else "غير محدد"
                 country_text = country if country else "غير محددة"
@@ -1059,20 +1051,9 @@ def diagnose_public_sources():
             item_link = (item.get("link") or "").strip()
             item_html = item.get("html") or ""
             genres, country, year = _metadata_from_public_post(item)
-            detail_status = "not_needed"
-            needs_detail = not genres or not country or not year
-            if item_link and needs_detail and detail_checks < 3:
-                detail_genres, detail_country, detail_year, detail_html, detail_status = get_series_details(
-                    diagnostic_scraper, item_link
-                )
-                detail_checks += 1
-                genres = genres or detail_genres
-                country = country or detail_country
-                year = year or detail_year
-                if detail_html:
-                    item_html = detail_html
-            elif needs_detail:
-                detail_status = "not_checked_limit"
+            # Theme detail pages return HTTP 403 from this service; keep diagnostics read-only
+            # and inspect the public post fields/terms instead of repeating that request.
+            detail_status = "public_api_only_page_blocked"
             year = year or _extract_year(title=item_title, url=item_link, markup=item_html)
             public_meta = item.get("public_meta") or {}
             term_records = item.get("terms") or []
