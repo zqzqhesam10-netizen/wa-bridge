@@ -15,7 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-29-public-api-metadata-7"
+APP_CODE_VERSION = "2026-10-29-public-api-metadata-8"
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/feed/").strip()
 
 # Canonicalize a legacy environment value that still points at the Cloudflare-protected HTML page.
@@ -1093,9 +1093,11 @@ def diagnose_public_sources():
             )
         else:
             next_step = (
-                "Feed items and images are available. The sampled detail pages did not provide all metadata fields; "
-                "inspect sample_items.metadata_page_status. Automatic polling is configured for every 30 seconds, "
-                "up to 5 newest unrecorded items per check. This diagnostic did not send messages."
+                "Feed items and images are available. Metadata extraction now checks the public WordPress REST fields, "
+                "public custom-meta keys, and embedded taxonomy terms without requesting the blocked single-item pages. "
+                "Inspect sample_items.public_terms and sample_items.public_meta_keys to see which public genre/country/year "
+                "fields the site exposes. Automatic polling is enabled every 30 seconds, up to 5 newest unrecorded "
+                "items per check. This diagnostic did not send messages."
             )
     elif source_inspection["items_found"]:
         next_step = (
