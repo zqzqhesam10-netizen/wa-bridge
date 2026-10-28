@@ -489,10 +489,43 @@ def check_updates():
             response.raise_for_status()
 
         items, source_format = _parse_source_response(response, result["source"])
+        effective_source_url = result["source"]
+
+        # Some WordPress custom feeds return a valid empty RSS document. When that
+        # happens, fall back to the site's publicly reachable posts REST endpoint.
+        if not items and source_format in ("rss", "atom"):
+            parsed_source = urlparse(result["source"])
+            if parsed_source.scheme in ("http", "https") and parsed_source.netloc:
+                fallback_url = urljoin(
+                    f"{parsed_source.scheme}://{parsed_source.netloc}",
+                    "/wp-json/wp/v2/posts?per_page=20&orderby=date&order=desc&_embed=1"
+                )
+                result["fallback_source_url"] = fallback_url
+                response.close()
+                fallback_response = scraper.get(fallback_url, timeout=20)
+                fallback_response.encoding = "utf-8"
+                fallback_items, fallback_format = _parse_source_response(fallback_response, fallback_url)
+                if fallback_items:
+                    response = fallback_response
+                    items = fallback_items
+                    source_format = fallback_format
+                    effective_source_url = fallback_url
+                    result["effective_source_url"] = fallback_url
+                    result["source_http_status"] = fallback_response.status_code
+                    result["final_url"] = fallback_response.url
+                    result["response_content_type"] = fallback_response.headers.get("Content-Type")
+                    result["response_server"] = fallback_response.headers.get("Server")
+                else:
+                    fallback_response.close()
+                    result["effective_source_url"] = fallback_url
+                    result["fallback_error"] = "The public WordPress API returned no parseable posts."
+
+        result["effective_source_url"] = effective_source_url
         result["source_format"] = source_format
         result["items_found"] = len(items)
         result["anchors_found"] = len(items)
-        _enrich_missing_images(items, scraper, result["source"])
+        if any(not item.get("image") for item in items):
+            _enrich_missing_images(items, scraper, effective_source_url)
         response.close()
 
         if not items:
@@ -674,6 +707,8 @@ def diagnose_public_sources():
     usable = [p["url"] for p in probes if p and p["usable_feed_or_json_candidate"]]
     source_inspection = {
         "url": SOURCE_URL,
+        "effective_url": SOURCE_URL,
+        "fallback_used": False,
         "format": None,
         "http_status": None,
         "items_found": 0,
@@ -688,22 +723,47 @@ def diagnose_public_sources():
             allow_redirects=True,
             headers={
                 "User-Agent": "WA-Bridge-Source-Diagnostic/1.0",
-                "Accept": "application/rss+xml, application/atom+xml, application/json, application/xml, text/xml, text/html;q=0.8, */*;q=0.5"
+                "Accept": "application/rss+xml, application/atom+xml, application/json, application/xml, text/xml, */*;q=0.8"
             }
         )
         source_inspection["http_status"] = response.status_code
         response.encoding = "utf-8"
         items, source_format = _parse_source_response(response, SOURCE_URL)
+
+        if not items and source_format in ("rss", "atom"):
+            parsed_source = urlparse(SOURCE_URL)
+            if parsed_source.scheme in ("http", "https") and parsed_source.netloc:
+                fallback_url = urljoin(
+                    f"{parsed_source.scheme}://{parsed_source.netloc}",
+                    "/wp-json/wp/v2/posts?per_page=20&orderby=date&order=desc&_embed=1"
+                )
+                response.close()
+                source_inspection["fallback_used"] = True
+                source_inspection["effective_url"] = fallback_url
+                response = requests.get(
+                    fallback_url,
+                    timeout=15,
+                    allow_redirects=True,
+                    headers={
+                        "User-Agent": "WA-Bridge-Source-Diagnostic/1.0",
+                        "Accept": "application/json"
+                    }
+                )
+                response.encoding = "utf-8"
+                source_inspection["http_status"] = response.status_code
+                items, source_format = _parse_source_response(response, fallback_url)
+
         source_inspection["format"] = source_format
         source_inspection["items_found"] = len(items)
-        if source_format in ("rss", "atom") and any(not item.get("image") for item in items):
-            _enrich_missing_images(items, cloudscraper.create_scraper(), SOURCE_URL)
+        if any(not item.get("image") for item in items):
+            _enrich_missing_images(items, cloudscraper.create_scraper(), source_inspection["effective_url"])
         source_inspection["items_with_images"] = sum(1 for item in items if item.get("image"))
         source_inspection["sample_items"] = [
             {
                 "title": item.get("title"),
                 "link": item.get("link"),
-                "has_image": bool(item.get("image"))
+                "has_image": bool(item.get("image")),
+                "image_host": urlparse(item["image"]).hostname if item.get("image") else None
             }
             for item in items[:8]
         ]
@@ -723,8 +783,8 @@ def diagnose_public_sources():
         )
     elif usable:
         next_step = (
-            "Public RSS/Atom or JSON endpoints are reachable, but the configured SOURCE_URL did not parse into items. "
-            "Set SOURCE_URL to https://tuktukcinemas.com/recent/feed/ and redeploy."
+            "The configured RSS feed was empty. The new code falls back to the public WordPress posts API. "
+            "Inspect source_inspection.effective_url and sample_items before testing delivery."
         )
     else:
         next_step = (
