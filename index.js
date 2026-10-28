@@ -50,7 +50,7 @@ async function startBot() {
     await initDB();
 
     const { state, saveCreds } =
-        await useMultiFileAuthState("auth_info");
+        await useMultiFileAuthState(process.env.AUTH_DIR || "auth_info");
 
     sock = makeWASocket({
         auth: state,
