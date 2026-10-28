@@ -14,7 +14,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-29-rss-source-2"
+APP_CODE_VERSION = "2026-10-29-rss-fallback-3"
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/feed/").strip()
 
 # Canonicalize a legacy environment value that still points at the Cloudflare-protected HTML page.
@@ -432,6 +432,9 @@ def check_updates():
         "status": "starting",
         "code_version": APP_CODE_VERSION,
         "source": SOURCE_URL,
+        "effective_source_url": SOURCE_URL,
+        "fallback_source_url": None,
+        "fallback_error": None,
         "source_format": None,
         "final_url": None,
         "response_content_type": None,
@@ -501,6 +504,8 @@ def check_updates():
                     "/wp-json/wp/v2/posts?per_page=20&orderby=date&order=desc&_embed=1"
                 )
                 result["fallback_source_url"] = fallback_url
+                effective_source_url = fallback_url
+                result["effective_source_url"] = fallback_url
                 response.close()
                 fallback_response = scraper.get(fallback_url, timeout=20)
                 fallback_response.encoding = "utf-8"
