@@ -1,9 +1,13 @@
 const { spawn } = require("node:child_process");
 const path = require("node:path");
+const fs = require("node:fs");
 
 const appPort = String(process.env.PORT || "10000");
 const flaskPort = String(process.env.FLASK_INTERNAL_PORT || "5001");
 const python = process.env.PYTHON_BIN || "/opt/venv/bin/python";
+// Without a mounted volume, keep WhatsApp credentials in an explicitly writable ephemeral path.
+const authDir = process.env.AUTH_DIR || "/tmp/wa-bridge-auth";
+fs.mkdirSync(authDir, { recursive: true });
 
 const children = [];
 let stopping = false;
@@ -40,7 +44,7 @@ const bridge = spawn(
     process.execPath,
     [path.join(__dirname, "index.js")],
     {
-        env: { ...process.env, PORT: appPort },
+        env: { ...process.env, PORT: appPort, AUTH_DIR: authDir },
         stdio: "inherit"
     }
 );
