@@ -1,5 +1,6 @@
 from flask import Flask, jsonify, request
 import requests, os, psycopg2
+import re, threading, time
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
@@ -14,7 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-29-rss-fallback-4"
+APP_CODE_VERSION = "2026-10-29-metadata-auto-poll-5"
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/feed/").strip()
 
 # Canonicalize a legacy environment value that still points at the Cloudflare-protected HTML page.
@@ -34,6 +35,21 @@ if (
         query="",
         fragment=""
     ).geturl()
+
+
+AUTO_POLL_INTERVAL_SECONDS = 30
+AUTO_POLL_MAX_ITEMS = 5
+_CHECK_LOCK = threading.Lock()
+_POLL_STATE = {
+    "enabled": False,
+    "interval_seconds": AUTO_POLL_INTERVAL_SECONDS,
+    "max_items_per_check": AUTO_POLL_MAX_ITEMS,
+    "last_started_at": None,
+    "last_completed_at": None,
+    "last_status": None,
+    "last_sent": 0,
+    "last_error": None
+}
 
 
 
@@ -113,49 +129,35 @@ def send_to_whatsapp(image, caption):
 
 # ================= SCRAPER =================
 def get_series_details(scraper, url):
-
+    """Fetch an individual public title page and extract year/genre/country metadata."""
     try:
-        from urllib.parse import urljoin
+        full_url = urljoin("https://tuktukcinemas.com/", url)
+        response = scraper.get(full_url, timeout=18, allow_redirects=True)
+        status = f"HTTP_{response.status_code}"
+        response.encoding = "utf-8"
+        if not response.ok:
+            response.close()
+            print("DETAIL ERROR:", full_url, status, flush=True)
+            return [], "", "", "", status
 
-        full_url = urljoin("https://tuktukhd.com", url)
+        body = response.text or ""
+        body_lower = body[:5000].lower()
+        if any(marker in body_lower for marker in (
+            "just a moment...",
+            "enable javascript and cookies to continue",
+            "checking your browser",
+            "cf-chl-",
+            "challenge-platform"
+        )):
+            response.close()
+            return [], "", "", "", "CLOUDFLARE_CHALLENGE"
 
-        res = scraper.get(full_url, timeout=30)
-        res.raise_for_status()
-        res.encoding = "utf-8"
-
-        soup = BeautifulSoup(res.text, "html.parser")
-
-        genres = []
-        country = ""
-
-        for li in soup.find_all("li"):
-            text = li.get_text(" ", strip=True)
-
-            if text.startswith("الانواع"):
-                genres = [
-                    a.get_text(" ", strip=True)
-                    for a in li.find_all("a")
-                    if a.get_text(" ", strip=True)
-                ]
-                break
-
-        for li in soup.find_all("li"):
-            text = li.get_text(" ", strip=True)
-
-            if text.startswith("دولة المسلسل"):
-                links = li.find_all("a")
-
-                if links:
-                    country = links[0].get_text(" ", strip=True)
-                else:
-                    country = text.replace("دولة المسلسل", "", 1).strip()
-                break
-
-        return genres, country
-
-    except Exception as e:
-        print("DETAIL ERROR:", url, e)
-        return [], ""
+        genres, country, year = _extract_series_metadata(body, url=full_url)
+        response.close()
+        return genres, country, year, body, status
+    except Exception as exc:
+        print("DETAIL ERROR:", url, f"{type(exc).__name__}: {exc}", flush=True)
+        return [], "", "", "", f"{type(exc).__name__}: {exc}"
 
 
 def _local_name(tag):
@@ -400,31 +402,93 @@ def _enrich_missing_images(items, scraper, source_url):
         print("SOURCE IMAGE ENRICHMENT WARNING:", f"{type(exc).__name__}: {exc}", flush=True)
 
 
-def _extract_series_metadata(markup):
+def _latin_digits(value):
+    return str(value or "").translate(str.maketrans(
+        "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
+        "01234567890123456789"
+    ))
+
+
+_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+_YEAR_LABEL_RE = re.compile(
+    r"(?:موعد\s+الصدور|موعد\s+الإصدار|سنة\s+(?:الإنتاج|الانتاج|الإصدار|الاصدار)|"
+    r"تاريخ\s+(?:الإنتاج|الانتاج)|release\s+year|release\s+date|year)"
+    r"\s*[:：\-]?\s*(?:\([^)]*\)\s*)?((?:19|20)\d{2})",
+    re.IGNORECASE
+)
+
+
+def _extract_year(title="", url="", markup=""):
+    title_text = _latin_digits(BeautifulSoup(str(title or ""), "html.parser").get_text(" ", strip=True))
+    match = _YEAR_RE.search(title_text)
+    if match:
+        return match.group(0)
+
+    if markup:
+        text = _latin_digits(BeautifulSoup(str(markup), "html.parser").get_text(" ", strip=True))
+        match = _YEAR_LABEL_RE.search(text)
+        if match:
+            return match.group(1)
+
+    path_text = _latin_digits(urlparse(str(url or "")).path.replace("-", " ").replace("_", " "))
+    match = _YEAR_RE.search(path_text)
+    return match.group(0) if match else ""
+
+
+def _first_labeled_value(soup, labels):
+    label_pattern = re.compile(
+        r"^\s*(?:" + "|".join(labels) + r")\s*[:：\-]?\s*(.*?)\s*$",
+        re.IGNORECASE
+    )
+    # Inspect likely field containers first, then more general containers.
+    for tag_name in ("li", "tr", "dt", "dd", "p", "span", "div"):
+        for node in soup.find_all(tag_name):
+            text = " ".join(node.get_text(" ", strip=True).split())
+            if not text or len(text) > 420:
+                continue
+            match = label_pattern.match(text)
+            if not match:
+                continue
+
+            value = (match.group(1) or "").strip(" \t\r\n:：-–—")
+            links = [
+                " ".join(a.get_text(" ", strip=True).split())
+                for a in node.find_all("a")
+                if " ".join(a.get_text(" ", strip=True).split())
+            ]
+            # When the source links each genre/country value, prefer those clean labels.
+            if links:
+                return list(dict.fromkeys(links)), value
+            return [], value
+    return [], ""
+
+
+def _extract_series_metadata(markup, title="", url=""):
     genres = []
     country = ""
-    if not markup:
-        return genres, country
-    soup = BeautifulSoup(markup, "html.parser")
-    for li in soup.find_all("li"):
-        text = li.get_text(" ", strip=True)
-        if text.startswith("الانواع"):
-            genres = [
-                a.get_text(" ", strip=True)
-                for a in li.find_all("a")
-                if a.get_text(" ", strip=True)
-            ]
-            break
-    for li in soup.find_all("li"):
-        text = li.get_text(" ", strip=True)
-        if text.startswith("دولة المسلسل"):
-            links = li.find_all("a")
-            if links:
-                country = links[0].get_text(" ", strip=True)
-            else:
-                country = text.replace("دولة المسلسل", "", 1).strip()
-            break
-    return genres, country
+    if markup:
+        soup = BeautifulSoup(str(markup), "html.parser")
+        genre_links, genre_text = _first_labeled_value(soup, [
+            r"الأنواع", r"الانواع", r"النوع", r"نوع\s+العمل", r"genres?", r"genre"
+        ])
+        if genre_links:
+            genres = genre_links
+        elif genre_text:
+            # Keep a multi-word genre value together if the page does not link genres separately.
+            genres = [genre_text]
+
+        country_links, country_text = _first_labeled_value(soup, [
+            r"دولة\s+المسلسل", r"دولة\s+الفيلم", r"دولة\s+العمل",
+            r"بلد\s+الإنتاج", r"بلد\s+الانتاج", r"الدولة", r"البلد",
+            r"country(?:\s+of\s+origin)?"
+        ])
+        if country_links:
+            country = country_links[0]
+        elif country_text:
+            country = country_text
+
+    year = _extract_year(title=title, url=url, markup=markup)
+    return genres, country, year
 
 
 def check_updates(max_items=5):
@@ -560,11 +624,28 @@ def check_updates(max_items=5):
 
                 result["candidates_found"] += 1
                 title = (item.get("title") or "جديد").strip()
-                genres, country = _extract_series_metadata(item.get("html") or "")
+                metadata_html = item.get("html") or ""
+                genres, country, year = _extract_series_metadata(
+                    metadata_html, title=title, url=link
+                )
+                detail_status = "not_needed"
+                if not genres or not country or not year:
+                    detail_genres, detail_country, detail_year, detail_html, detail_status = get_series_details(
+                        scraper, link
+                    )
+                    genres = genres or detail_genres
+                    country = country or detail_country
+                    year = year or detail_year
+                    if detail_html:
+                        metadata_html = detail_html
+
+                year = year or _extract_year(title=title, url=link, markup=metadata_html)
                 genre_text = "، ".join(genres) if genres else "غير محدد"
-                country_text = country if country else "غير محدد"
+                country_text = country if country else "غير محددة"
+                year_text = year if year else "غير محددة"
                 caption = (
                     f"📺 {title}\n"
+                    f"📅 السنة: {year_text}\n"
                     f"🎭 النوع: {genre_text}\n"
                     f"🌍 الدولة: {country_text}\n"
                     f"🔥 متاح الآن في الاستراحة!"
@@ -575,6 +656,10 @@ def check_updates(max_items=5):
                 result["send_results"].append({
                     "title": title,
                     "link": link,
+                    "year": year_text,
+                    "genres": genres,
+                    "country": country_text,
+                    "metadata_page_status": detail_status,
                     "accepted": bool(ok),
                     "details": details
                 })
@@ -764,15 +849,42 @@ def diagnose_public_sources():
         if any(not item.get("image") for item in items):
             _enrich_missing_images(items, cloudscraper.create_scraper(), source_inspection["effective_url"])
         source_inspection["items_with_images"] = sum(1 for item in items if item.get("image"))
-        source_inspection["sample_items"] = [
-            {
-                "title": item.get("title"),
-                "link": item.get("link"),
+        source_inspection["sample_items"] = []
+        diagnostic_scraper = cloudscraper.create_scraper()
+        detail_checks = 0
+        for item in items[:8]:
+            item_title = (item.get("title") or "جديد").strip()
+            item_link = (item.get("link") or "").strip()
+            item_html = item.get("html") or ""
+            genres, country, year = _extract_series_metadata(
+                item_html, title=item_title, url=item_link
+            )
+            detail_status = "not_needed"
+            if item_link and (not genres or not country or not year) and detail_checks < 3:
+                detail_genres, detail_country, detail_year, detail_html, detail_status = get_series_details(
+                    diagnostic_scraper, item_link
+                )
+                detail_checks += 1
+                genres = genres or detail_genres
+                country = country or detail_country
+                year = year or detail_year
+                if detail_html:
+                    item_html = detail_html
+            year = year or _extract_year(title=item_title, url=item_link, markup=item_html)
+            source_inspection["sample_items"].append({
+                "title": item_title,
+                "link": item_link,
                 "has_image": bool(item.get("image")),
-                "image_host": urlparse(item["image"]).hostname if item.get("image") else None
-            }
-            for item in items[:8]
-        ]
+                "image_host": urlparse(item["image"]).hostname if item.get("image") else None,
+                "year": year or None,
+                "genres": genres,
+                "country": country or None,
+                "metadata_page_status": detail_status
+            })
+        source_inspection["items_with_metadata_in_sample"] = sum(
+            1 for item in source_inspection["sample_items"]
+            if item.get("year") and item.get("genres") and item.get("country")
+        )
         response.close()
     except Exception as exc:
         source_inspection["error"] = f"{type(exc).__name__}: {exc}"
@@ -806,6 +918,7 @@ def diagnose_public_sources():
         "probes": probes,
         "usable_feed_or_json_candidates": usable,
         "source_inspection": source_inspection,
+        "automatic_polling": dict(_POLL_STATE),
         "next_step": next_step
     }
 
@@ -840,7 +953,16 @@ def force_check():
             "allowed_limits": [1, 2, 3, 4, 5],
             "message_sending": False
         }), 400
-    result = check_updates(max_items=limit)
+    if not _CHECK_LOCK.acquire(blocking=False):
+        return jsonify({
+            "status": "check_in_progress",
+            "message_sending": False,
+            "message": "A scheduled or manual update check is already running."
+        }), 409
+    try:
+        result = check_updates(max_items=limit)
+    finally:
+        _CHECK_LOCK.release()
     status_code = 502 if result["status"] in ("error", "send_failed") else 200
     return jsonify(result), status_code
 
@@ -865,6 +987,60 @@ def test():
     return "sent"
 
 
+def _automatic_update_poller():
+    # Allow the companion Node process and WhatsApp connection to settle after deployment.
+    time.sleep(10)
+    print(
+        f"AUTO POLLER STARTED: interval={AUTO_POLL_INTERVAL_SECONDS}s max_items={AUTO_POLL_MAX_ITEMS}",
+        flush=True
+    )
+    while True:
+        cycle_started = time.monotonic()
+        if _CHECK_LOCK.acquire(blocking=False):
+            try:
+                _POLL_STATE["last_started_at"] = datetime.now().isoformat(timespec="seconds")
+                result = check_updates(max_items=AUTO_POLL_MAX_ITEMS)
+                _POLL_STATE["last_completed_at"] = datetime.now().isoformat(timespec="seconds")
+                _POLL_STATE["last_status"] = result.get("status")
+                _POLL_STATE["last_sent"] = result.get("sent", 0)
+                _POLL_STATE["last_error"] = (result.get("errors") or [None])[0]
+                print(
+                    "AUTO POLL SUMMARY: " + json.dumps({
+                        "code_version": APP_CODE_VERSION,
+                        "status": result.get("status"),
+                        "sent": result.get("sent", 0),
+                        "attempts": result.get("attempts", 0),
+                        "interval_seconds": AUTO_POLL_INTERVAL_SECONDS
+                    }, ensure_ascii=False),
+                    flush=True
+                )
+            except Exception as exc:
+                _POLL_STATE["last_completed_at"] = datetime.now().isoformat(timespec="seconds")
+                _POLL_STATE["last_status"] = "error"
+                _POLL_STATE["last_error"] = f"{type(exc).__name__}: {exc}"
+                print("AUTO POLL ERROR:", _POLL_STATE["last_error"], flush=True)
+            finally:
+                _CHECK_LOCK.release()
+        else:
+            print("AUTO POLL SKIPPED: another update check is still running", flush=True)
+
+        elapsed = time.monotonic() - cycle_started
+        time.sleep(max(1, AUTO_POLL_INTERVAL_SECONDS - elapsed))
+
+
+def start_automatic_update_poller():
+    if _POLL_STATE["enabled"]:
+        return
+    _POLL_STATE["enabled"] = True
+    thread = threading.Thread(
+        target=_automatic_update_poller,
+        name="wa-bridge-auto-update-poller",
+        daemon=True
+    )
+    thread.start()
+
+
 if __name__ == "__main__":
     init_db()
+    start_automatic_update_poller()
     app.run(host="127.0.0.1", port=int(os.environ.get("PORT", 5000)))
