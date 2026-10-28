@@ -1,0 +1,19 @@
+build:
+  command: "npm install"
+  system: auto
+
+start_command: "node index.js"
+
+scaling:
+  trigger: http_requests
+  min_cpu: 0.1
+  max_cpu: 0.25
+  min_memory: 256
+  max_memory: 512
+  min_replicas: 1
+  max_replicas: 1
+
+health_check:
+  type: http
+  http_path: "/status"
+  interval_in_seconds: 30
