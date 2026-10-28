@@ -209,6 +209,7 @@ async function proxyToFlask(req, res) {
     }
 }
 
+app.get("/api/source_diagnostic", proxyToFlask);
 app.get("/api/check_updates", proxyToFlask);
 app.get("/api/clear_messages", proxyToFlask);
 app.get("/api/send_test", proxyToFlask);
