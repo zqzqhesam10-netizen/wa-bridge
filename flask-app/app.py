@@ -15,7 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-29-metadata-auto-poll-5"
+APP_CODE_VERSION = "2026-10-29-public-api-metadata-6"
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/feed/").strip()
 
 # Canonicalize a legacy environment value that still points at the Cloudflare-protected HTML page.
@@ -312,6 +312,33 @@ def _parse_source_response(response, source_url):
             image_url = None
             if media and isinstance(media[0], dict):
                 image_url = media[0].get("source_url")
+
+            # Embedded WP terms expose public category/tag/taxonomy labels even when
+            # the theme's single-item HTML page is blocked by Cloudflare.
+            term_records = []
+            for term_group in (embedded.get("wp:term") or []):
+                if not isinstance(term_group, list):
+                    continue
+                for term in term_group:
+                    if not isinstance(term, dict):
+                        continue
+                    term_taxonomy = str(term.get("taxonomy") or "").strip()
+                    if not term_taxonomy:
+                        links = term.get("_links") or {}
+                        collection = links.get("collection") or []
+                        href = collection[0].get("href", "") if collection and isinstance(collection[0], dict) else ""
+                        match = re.search(r"/wp/v2/([^/?]+)", href)
+                        term_taxonomy = match.group(1) if match else ""
+                    term_name = BeautifulSoup(str(term.get("name") or ""), "html.parser").get_text(" ", strip=True)
+                    if term_name:
+                        term_records.append({
+                            "name": term_name,
+                            "slug": str(term.get("slug") or ""),
+                            "taxonomy": term_taxonomy,
+                            "description": BeautifulSoup(str(term.get("description") or ""), "html.parser").get_text(" ", strip=True)
+                        })
+
+            public_meta = post.get("meta") if isinstance(post.get("meta"), dict) else {}
             link = str(post.get("link") or post.get("guid", {}).get("rendered", "") or "")
             items.append({
                 "title": BeautifulSoup(title, "html.parser").get_text(" ", strip=True) or "جديد",
@@ -319,7 +346,11 @@ def _parse_source_response(response, source_url):
                 "image": image_url or _image_from_html(content_html or excerpt_html, link or source_url),
                 "html": content_html or excerpt_html,
                 "source_format": "json",
-                "post_id": post.get("id")
+                "post_id": post.get("id"),
+                "slug": post.get("slug") or "",
+                "date": post.get("date") or "",
+                "public_meta": public_meta,
+                "terms": term_records
             })
         return items, "json"
 
@@ -491,6 +522,179 @@ def _extract_series_metadata(markup, title="", url=""):
     return genres, country, year
 
 
+def _metadata_scalars(value, prefix=""):
+    """Yield public REST meta key/value pairs, including nested plugin metadata."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            yield from _metadata_scalars(child, path)
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            yield from _metadata_scalars(child, f"{prefix}[{index}]")
+    elif value is not None:
+        text = " ".join(str(value).split())
+        if text:
+            yield prefix.casefold(), text
+
+
+_COUNTRY_ALIASES = [
+    (("تركيا", "تركي", "تركية", "turkey", "turkish"), "تركيا"),
+    (("كوريا الجنوبية", "كوري جنوبي", "كورية جنوبية", "south korea", "south korean", "korean"), "كوريا الجنوبية"),
+    (("كوريا", "كوري", "كورية", "korea"), "كوريا"),
+    (("الصين", "صيني", "صينية", "china", "chinese"), "الصين"),
+    (("اليابان", "ياباني", "يابانية", "japan", "japanese"), "اليابان"),
+    (("الهند", "هندي", "هندية", "india", "indian"), "الهند"),
+    (("مصر", "مصري", "مصرية", "egypt", "egyptian"), "مصر"),
+    (("الولايات المتحدة", "أمريكا", "امريكا", "أمريكي", "أمريكية", "united states", "american"), "الولايات المتحدة"),
+    (("بريطانيا", "المملكة المتحدة", "بريطاني", "britain", "british", "united kingdom"), "بريطانيا"),
+    (("إسبانيا", "اسبانيا", "إسباني", "اسبانى", "spain", "spanish"), "إسبانيا"),
+    (("فرنسا", "فرنسي", "فرنسية", "france", "french"), "فرنسا"),
+    (("ألمانيا", "المانيا", "ألماني", "germany", "german"), "ألمانيا"),
+    (("تايلاند", "تايلندي", "تايلندية", "thailand", "thai"), "تايلاند"),
+    (("الفلبين", "فلبيني", "فلبينية", "philippines", "filipino"), "الفلبين"),
+    (("إندونيسيا", "اندونيسيا", "إندونيسي", "indonesia", "indonesian"), "إندونيسيا"),
+    (("إيران", "ايران", "إيراني", "iran", "iranian"), "إيران"),
+    (("باكستان", "باكستاني", "pakistan", "pakistani"), "باكستان"),
+    (("روسيا", "روسي", "روسية", "russia", "russian"), "روسيا"),
+    (("كندا", "كندي", "كندية", "canada", "canadian"), "كندا"),
+    (("أستراليا", "استراليا", "أسترالي", "australia", "australian"), "أستراليا"),
+    (("إيطاليا", "ايطاليا", "إيطالي", "italy", "italian"), "إيطاليا"),
+    (("المكسيك", "مكسيكي", "mexico", "mexican"), "المكسيك"),
+    (("لبنان", "لبناني", "لبنانية", "lebanon", "lebanese"), "لبنان"),
+    (("سوريا", "سوري", "سورية", "syria", "syrian"), "سوريا"),
+    (("الأردن", "الاردن", "أردني", "jordan", "jordanian"), "الأردن"),
+    (("المغرب", "مغربي", "مغربية", "morocco", "moroccan"), "المغرب"),
+    (("الكويت", "كويتي", "kuwait", "kuwaiti"), "الكويت"),
+    (("السعودية", "سعودي", "سعودية", "saudi arabia", "saudi"), "السعودية")
+]
+
+_GENRE_ALIASES = [
+    (("دراما", "drama"), "دراما"),
+    (("كوميدي", "كوميديا", "comedy", "comedies"), "كوميديا"),
+    (("أكشن", "اكشن", "action"), "أكشن"),
+    (("مغامرة", "مغامرات", "adventure"), "مغامرة"),
+    (("رومانسي", "رومانسية", "romance", "romantic"), "رومانسي"),
+    (("رعب", "horror"), "رعب"),
+    (("إثارة", "اثارة", "thriller"), "إثارة"),
+    (("غموض", "mystery"), "غموض"),
+    (("خيال علمي", "science fiction", "sci-fi", "scifi"), "خيال علمي"),
+    (("عائلي", "عائلي", "family"), "عائلي"),
+    (("جريمة", "crime"), "جريمة"),
+    (("حرب", "war"), "حرب"),
+    (("وثائقي", "وثائقية", "documentary"), "وثائقي"),
+    (("رسوم متحركة", "animation", "animated"), "رسوم متحركة"),
+    (("فانتازيا", "fantasy"), "فانتازيا"),
+    (("تاريخي", "تاريخية", "history", "historical"), "تاريخي")
+]
+
+
+def _normalize_country(value):
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return ""
+    folded = text.casefold()
+    for aliases, canonical in _COUNTRY_ALIASES:
+        if any(alias.casefold() in folded for alias in aliases):
+            return canonical
+    return text
+
+
+def _normalize_genre(value):
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return ""
+    folded = text.casefold()
+    found = []
+    for aliases, canonical in _GENRE_ALIASES:
+        if any(alias.casefold() in folded for alias in aliases):
+            found.append(canonical)
+    if found:
+        return "، ".join(dict.fromkeys(found))
+    return text
+
+
+def _metadata_from_public_post(item):
+    """Extract year, genres and country from the REST response without opening the blocked theme page."""
+    title = item.get("title") or ""
+    url = item.get("link") or ""
+    markup = item.get("html") or ""
+    genres, country, year = _extract_series_metadata(markup, title=title, url=url)
+
+    meta_year = ""
+    meta_genres = []
+    meta_country = ""
+    for key, value in _metadata_scalars(item.get("public_meta") or {}):
+        key_norm = key.replace("_", " ").replace("-", " ").replace(".", " ")
+        key_norm = re.sub(r"\[\d+\]", " ", key_norm)
+        key_norm = " ".join(key_norm.split())
+        # Only accept obvious public year/release-year fields, not post-published dates.
+        if not meta_year and (
+            re.search(r"\byear\b", key_norm)
+            or "سنة" in key_norm
+            or "عام الإنتاج" in key_norm
+            or "عام الانتاج" in key_norm
+            or "سنة الإصدار" in key_norm
+            or "سنة الاصدار" in key_norm
+        ):
+            match = _YEAR_RE.search(_latin_digits(value))
+            if match:
+                meta_year = match.group(0)
+        if not meta_genres and (
+            "genre" in key_norm or "النوع" in key_norm or "الانواع" in key_norm or "الأنواع" in key_norm
+        ):
+            values = [part.strip() for part in re.split(r"[,،|/]", value) if part.strip()]
+            if values:
+                meta_genres = [_normalize_genre(part) for part in values]
+        if not meta_country and (
+            "country" in key_norm or "بلد" in key_norm or "دولة" in key_norm
+        ):
+            meta_country = _normalize_country(value)
+
+    genres = genres or meta_genres
+    country = country or meta_country
+
+    terms = item.get("terms") or []
+    explicit_genres = []
+    explicit_country = ""
+    generic_genres = []
+    generic_country = ""
+
+    for term in terms:
+        if not isinstance(term, dict):
+            continue
+        name = " ".join(str(term.get("name") or "").split()).strip()
+        taxonomy = " ".join(str(term.get("taxonomy") or "").casefold().replace("-", "_").split())
+        if not name:
+            continue
+
+        if re.search(r"genre|نوع|الانواع|الأنواع", taxonomy):
+            explicit_genres.append(_normalize_genre(name))
+        elif re.search(r"country|countries|دولة|بلد", taxonomy):
+            explicit_country = explicit_country or _normalize_country(name)
+
+        country_guess = ""
+        for aliases, canonical in _COUNTRY_ALIASES:
+            if any(alias.casefold() in name.casefold() for alias in aliases):
+                country_guess = canonical
+                break
+        if country_guess and not explicit_country:
+            generic_country = generic_country or country_guess
+
+        genre_guess = _normalize_genre(name)
+        if genre_guess and genre_guess != name:
+            generic_genres.append(genre_guess)
+        elif any(alias.casefold() in name.casefold() for aliases, _ in _GENRE_ALIASES for alias in aliases):
+            generic_genres.append(genre_guess)
+
+    genres = genres or list(dict.fromkeys(explicit_genres or generic_genres))
+    country = country or explicit_country or generic_country
+
+    # Some public meta implementations only expose keys whose names contain "year".
+    # Never substitute the WordPress post publication date for a production/release year.
+    year = year or meta_year or _extract_year(title=title, url=url, markup=markup)
+    return list(dict.fromkeys(x for x in genres if x)), country, year
+
+
 def check_updates(max_items=5):
     result = {
         "status": "starting",
@@ -625,9 +829,7 @@ def check_updates(max_items=5):
                 result["candidates_found"] += 1
                 title = (item.get("title") or "جديد").strip()
                 metadata_html = item.get("html") or ""
-                genres, country, year = _extract_series_metadata(
-                    metadata_html, title=title, url=link
-                )
+                genres, country, year = _metadata_from_public_post(item)
                 detail_status = "not_needed"
                 if not genres or not country or not year:
                     detail_genres, detail_country, detail_year, detail_html, detail_status = get_series_details(
@@ -856,11 +1058,10 @@ def diagnose_public_sources():
             item_title = (item.get("title") or "جديد").strip()
             item_link = (item.get("link") or "").strip()
             item_html = item.get("html") or ""
-            genres, country, year = _extract_series_metadata(
-                item_html, title=item_title, url=item_link
-            )
+            genres, country, year = _metadata_from_public_post(item)
             detail_status = "not_needed"
-            if item_link and (not genres or not country or not year) and detail_checks < 3:
+            needs_detail = not genres or not country or not year
+            if item_link and needs_detail and detail_checks < 3:
                 detail_genres, detail_country, detail_year, detail_html, detail_status = get_series_details(
                     diagnostic_scraper, item_link
                 )
@@ -870,7 +1071,11 @@ def diagnose_public_sources():
                 year = year or detail_year
                 if detail_html:
                     item_html = detail_html
+            elif needs_detail:
+                detail_status = "not_checked_limit"
             year = year or _extract_year(title=item_title, url=item_link, markup=item_html)
+            public_meta = item.get("public_meta") or {}
+            term_records = item.get("terms") or []
             source_inspection["sample_items"].append({
                 "title": item_title,
                 "link": item_link,
@@ -879,7 +1084,16 @@ def diagnose_public_sources():
                 "year": year or None,
                 "genres": genres,
                 "country": country or None,
-                "metadata_page_status": detail_status
+                "metadata_page_status": detail_status,
+                "public_meta_keys": sorted(str(key) for key in public_meta.keys())[:60],
+                "public_terms": [
+                    {
+                        "name": term.get("name"),
+                        "taxonomy": term.get("taxonomy"),
+                        "slug": term.get("slug")
+                    }
+                    for term in term_records[:30]
+                ]
             })
         source_inspection["items_with_metadata_in_sample"] = sum(
             1 for item in source_inspection["sample_items"]
