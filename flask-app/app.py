@@ -15,7 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-29-public-metadata-type-year-9"
+APP_CODE_VERSION = "2026-10-29-rest-registry-diagnostic-10"
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/feed/").strip()
 
 # Canonicalize a legacy environment value that still points at the Cloudflare-protected HTML page.
@@ -1038,6 +1038,9 @@ def diagnose_public_sources():
         urljoin(origin, "/feed/"),
         urljoin(origin, "/recent/feed/"),
         urljoin(origin, "/wp-json/wp/v2/posts?per_page=3&_embed=1"),
+        urljoin(origin, "/wp-json/wp/v2/types"),
+        urljoin(origin, "/wp-json/wp/v2/taxonomies"),
+        urljoin(origin, "/wp-json/wp/v2/categories?per_page=100"),
         urljoin(origin, "/wp-sitemap.xml")
     ]
     unique_urls = list(dict.fromkeys(urls))
@@ -1048,6 +1051,119 @@ def diagnose_public_sources():
             probes[futures[future]] = future.result()
 
     usable = [p["url"] for p in probes if p and p["usable_feed_or_json_candidate"]]
+
+    # Discover whether WordPress exposes a public custom post type that might contain
+    # richer series/movie metadata. This does not send messages or alter data.
+    rest_registry = {
+        "types_http_status": None,
+        "taxonomies_http_status": None,
+        "public_types": [],
+        "public_taxonomies": [],
+        "custom_rest_base_probes": [],
+        "error": None
+    }
+    registry_headers = {
+        "User-Agent": "WA-Bridge-Source-Diagnostic/1.0",
+        "Accept": "application/json"
+    }
+    try:
+        types_url = urljoin(origin, "/wp-json/wp/v2/types")
+        types_response = requests.get(types_url, timeout=10, allow_redirects=True, headers=registry_headers)
+        rest_registry["types_http_status"] = types_response.status_code
+        if types_response.ok and isinstance(types_response.json(), dict):
+            types_data = types_response.json()
+            for slug, data in types_data.items():
+                if not isinstance(data, dict):
+                    continue
+                rest_base = str(data.get("rest_base") or slug).strip("/")
+                labels = data.get("labels") if isinstance(data.get("labels"), dict) else {}
+                rest_registry["public_types"].append({
+                    "slug": slug,
+                    "rest_base": rest_base,
+                    "name": labels.get("name") or labels.get("singular_name") or slug,
+                    "taxonomies": data.get("taxonomies") or [],
+                    "has_rest_base": bool(rest_base)
+                })
+        types_response.close()
+
+        taxonomies_url = urljoin(origin, "/wp-json/wp/v2/taxonomies")
+        taxonomies_response = requests.get(
+            taxonomies_url, timeout=10, allow_redirects=True, headers=registry_headers
+        )
+        rest_registry["taxonomies_http_status"] = taxonomies_response.status_code
+        if taxonomies_response.ok and isinstance(taxonomies_response.json(), dict):
+            taxonomies_data = taxonomies_response.json()
+            for slug, data in taxonomies_data.items():
+                if not isinstance(data, dict):
+                    continue
+                labels = data.get("labels") if isinstance(data.get("labels"), dict) else {}
+                rest_registry["public_taxonomies"].append({
+                    "slug": slug,
+                    "rest_base": data.get("rest_base") or slug,
+                    "name": labels.get("name") or labels.get("singular_name") or slug,
+                    "types": data.get("types") or [],
+                    "hierarchical": bool(data.get("hierarchical"))
+                })
+        taxonomies_response.close()
+
+        known_bases = {
+            "posts", "pages", "media", "categories", "tags", "users",
+            "comments", "types", "taxonomies", "statuses", "blocks",
+            "templates", "template-parts", "global-styles", "navigation"
+        }
+        candidates = []
+        for entry in rest_registry["public_types"]:
+            base = str(entry.get("rest_base") or "").strip("/")
+            if not base or base.lower() in known_bases or "/" in base:
+                continue
+            if base not in candidates:
+                candidates.append(base)
+
+        for base in candidates[:5]:
+            candidate_url = urljoin(origin, f"/wp-json/wp/v2/{base}?per_page=2&_embed=1")
+            probe = {
+                "rest_base": base,
+                "url": candidate_url,
+                "http_status": None,
+                "item_count": 0,
+                "sample": [],
+                "error": None
+            }
+            try:
+                custom_response = requests.get(
+                    candidate_url, timeout=8, allow_redirects=True, headers=registry_headers
+                )
+                probe["http_status"] = custom_response.status_code
+                if custom_response.ok:
+                    custom_data = custom_response.json()
+                    if isinstance(custom_data, list):
+                        probe["item_count"] = len(custom_data)
+                        for record in custom_data[:2]:
+                            if not isinstance(record, dict):
+                                continue
+                            raw_title = record.get("title") or {}
+                            title = raw_title.get("rendered", "") if isinstance(raw_title, dict) else str(raw_title)
+                            raw_content = record.get("content") or {}
+                            content_html = raw_content.get("rendered", "") if isinstance(raw_content, dict) else str(raw_content)
+                            embedded = record.get("_embedded") or {}
+                            probe["sample"].append({
+                                "id": record.get("id"),
+                                "slug": record.get("slug"),
+                                "link": record.get("link"),
+                                "title": BeautifulSoup(title, "html.parser").get_text(" ", strip=True),
+                                "meta_keys": sorted((record.get("meta") or {}).keys())[:40]
+                                    if isinstance(record.get("meta"), dict) else [],
+                                "content_excerpt": BeautifulSoup(content_html, "html.parser").get_text(" ", strip=True)[:240],
+                                "embedded_keys": sorted(embedded.keys())[:20]
+                            })
+                custom_response.close()
+            except Exception as exc:
+                probe["error"] = f"{type(exc).__name__}: {exc}"
+            rest_registry["custom_rest_base_probes"].append(probe)
+        types_response = None
+    except Exception as exc:
+        rest_registry["error"] = f"{type(exc).__name__}: {exc}"
+
     source_inspection = {
         "url": SOURCE_URL,
         "effective_url": SOURCE_URL,
@@ -1150,6 +1266,9 @@ def diagnose_public_sources():
         source_inspection["items_with_country_in_sample"] = sum(
             1 for item in source_inspection["sample_items"] if item.get("country")
         )
+        source_inspection["items_with_detailed_genres_in_sample"] = sum(
+            1 for item in source_inspection["sample_items"] if item.get("genres")
+        )
         source_inspection["items_with_year_or_publication_year_in_sample"] = sum(
             1 for item in source_inspection["sample_items"]
             if item.get("year") or item.get("publication_year")
@@ -1161,7 +1280,9 @@ def diagnose_public_sources():
     if source_inspection["items_found"] and source_inspection["items_with_images"]:
         if source_inspection.get("items_with_metadata_in_sample", 0):
             next_step = (
-                "Feed items, images, and year/genre/country fields were found in the sampled items. "
+                "Feed items, images, broad work-type classifications, and some year/country data were found. "
+                "Detailed genres and some countries are absent from the standard public post fields, while the theme pages "
+                "are blocked. The read-only rest_registry section checks whether a public custom REST type exposes richer data. "
                 "Automatic polling is enabled every 30 seconds and processes up to 5 newest unrecorded items per check. "
                 "This diagnostic did not send messages."
             )
@@ -1195,6 +1316,7 @@ def diagnose_public_sources():
         "message_sending": False,
         "probes": probes,
         "usable_feed_or_json_candidates": usable,
+        "rest_registry": rest_registry,
         "source_inspection": source_inspection,
         "automatic_polling": dict(_POLL_STATE),
         "next_step": next_step
