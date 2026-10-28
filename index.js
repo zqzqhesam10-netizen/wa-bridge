@@ -159,32 +159,32 @@ app.get("/qr", async (req, res) => {
 // ================= SEND TEXT / IMAGE =================
 
 app.post("/send", async (req, res) => {
+    const { groupId, image, caption } = req.body || {};
+
+    if (!sock || !isConnected) {
+        console.log("SEND REJECTED: WhatsApp is not connected");
+        return res.status(503).json({ ok: false, error: "WhatsApp is not connected" });
+    }
+    if (typeof groupId !== "string" || !groupId.endsWith("@g.us")) {
+        return res.status(400).json({ ok: false, error: "groupId must be a WhatsApp group JID ending in @g.us" });
+    }
+    if (typeof image !== "string" || !/^https?:\/\//i.test(image)) {
+        return res.status(400).json({ ok: false, error: "image must be an absolute HTTP(S) URL" });
+    }
+
     try {
-
-        const {
-            groupId,
-            image,
-            caption
-        } = req.body;
-
-        await sock.sendMessage(groupId, {
-            image: {
-                url: image
-            },
+        console.log(`SEND REQUEST: group=${groupId} image_host=${new URL(image).host}`);
+        const sentMessage = await sock.sendMessage(groupId, {
+            image: { url: image },
             caption: caption || ""
         });
-
-        res.json({
-            ok: true
-        });
-
+        const messageId = sentMessage?.key?.id || null;
+        const remoteJid = sentMessage?.key?.remoteJid || groupId;
+        console.log(`SEND ACCEPTED: group=${groupId} message_id=${messageId || "unknown"} remote_jid=${remoteJid}`);
+        return res.json({ ok: true, messageId, remoteJid });
     } catch (e) {
-
-        console.log(e);
-
-        res.status(500).json({
-            error: e.message
-        });
+        console.error("SEND FAILED:", e);
+        return res.status(500).json({ ok: false, error: e.message || "WhatsApp send failed" });
     }
 });
 

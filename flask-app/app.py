@@ -1,6 +1,8 @@
 from flask import Flask, jsonify
 import requests, os, psycopg2
 from datetime import datetime
+from urllib.parse import urljoin
+import json
 from bs4 import BeautifulSoup
 import cloudscraper
 
@@ -40,10 +42,14 @@ def init_db():
 
 # ================= SEND TO NODE =================
 def send_to_whatsapp(image, caption):
+    if not NODE_URL:
+        return False, "NODE_URL environment variable is not configured"
+    if not image:
+        return False, "image URL is empty"
+    if not GROUP_ID or not GROUP_ID.endswith("@g.us"):
+        return False, "GROUP_ID is missing or is not a WhatsApp group JID"
 
     try:
-        if not NODE_URL:
-            raise RuntimeError("NODE_URL environment variable is not configured")
         response = requests.post(
             NODE_URL,
             json={
@@ -53,11 +59,33 @@ def send_to_whatsapp(image, caption):
             },
             timeout=60
         )
-        response.raise_for_status()
-        return True
+        if not response.ok:
+            detail = f"Node send endpoint returned HTTP {response.status_code}: {response.text[:300]}"
+            print("SEND ERROR:", detail, flush=True)
+            return False, detail
+
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+
+        if payload.get("ok") is not True:
+            detail = f"Node send endpoint did not confirm acceptance: {str(payload)[:300]}"
+            print("SEND ERROR:", detail, flush=True)
+            return False, detail
+
+        message_id = payload.get("messageId")
+        remote_jid = payload.get("remoteJid")
+        print(
+            f"SEND ACCEPTED: group={GROUP_ID} message_id={message_id or 'unknown'} remote_jid={remote_jid or 'unknown'}",
+            flush=True
+        )
+        return True, {"message_id": message_id, "remote_jid": remote_jid}
+
     except Exception as e:
-        print("SEND ERROR:", e)
-        return False
+        detail = f"{type(e).__name__}: {e}"
+        print("SEND ERROR:", detail, flush=True)
+        return False, detail
 
 
 # ================= SCRAPER =================
@@ -108,64 +136,146 @@ def get_series_details(scraper, url):
 
 
 def check_updates():
+    result = {
+        "status": "starting",
+        "source": "https://tuktukhd.com/recent/",
+        "group_id": GROUP_ID,
+        "node_url_configured": bool(NODE_URL),
+        "source_http_status": None,
+        "anchors_found": 0,
+        "candidates_found": 0,
+        "attempts": 0,
+        "sent": 0,
+        "failed": 0,
+        "skipped_missing_link": 0,
+        "skipped_missing_image": 0,
+        "duplicate_stop": False,
+        "send_results": [],
+        "errors": []
+    }
+    conn = None
+    cur = None
 
-    conn = db()
-    cur = conn.cursor()
+    try:
+        if not DATABASE_URL:
+            raise RuntimeError("DATABASE_URL environment variable is not configured")
+        if not NODE_URL:
+            raise RuntimeError("NODE_URL environment variable is not configured")
 
-    scraper = cloudscraper.create_scraper()
-    res = scraper.get("https://tuktukhd.com/recent/", timeout=30)
-    res.encoding = 'utf-8'
+        conn = db()
+        cur = conn.cursor()
+        scraper = cloudscraper.create_scraper()
+        response = scraper.get(result["source"], timeout=30)
+        result["source_http_status"] = response.status_code
+        response.raise_for_status()
+        response.encoding = "utf-8"
 
-    soup = BeautifulSoup(res.text, "html.parser")
-    items = soup.find_all("a")
-
-    sent = 0
-
-    for item in items:
-
-        if sent >= 5:
-            break
-
-        img = item.find("img")
-        if not img:
-            continue
-
-        title = item.get("title") or "جديد"
-        link = item.get("href")
-        img_url = img.get("data-src") or img.get("src")
-
-        if not link:
-            continue
-
-        # منع التكرار
-        cur.execute("SELECT 1 FROM messages WHERE message=%s", (link,))
-        if cur.fetchone():
-            break
-
-        genres, country = get_series_details(scraper, link)
-        genre_text = "، ".join(genres) if genres else "غير محدد"
-        country_text = country if country else "غير محدد"
-
-        msg = (
-            f"📺 {title}\n"
-            f"🎭 النوع: {genre_text}\n"
-            f"🌍 الدولة: {country_text}\n"
-            f"🔥 متاح الآن في الاستراحة!"
+        body_lower = response.text.lower()
+        challenge_markers = (
+            "just a moment...",
+            "checking your browser",
+            "cf-chl-",
+            "challenge-platform"
         )
+        if any(marker in body_lower for marker in challenge_markers):
+            raise RuntimeError("TukTukHD returned a browser/Cloudflare challenge page, not the recent-items page")
 
-        if not send_to_whatsapp(img_url, msg):
-            continue
+        soup = BeautifulSoup(response.text, "html.parser")
+        items = soup.find_all("a")
+        result["anchors_found"] = len(items)
 
-        cur.execute(
-            "INSERT INTO messages(phone,message,sender,msg_time) VALUES('system',%s,'system',%s)",
-            (link, datetime.now().strftime("%H:%M"))
-        )
+        if not items:
+            result["status"] = "no_candidates"
+            result["errors"].append("The source page returned no links; inspect the response HTML/source availability.")
 
-        conn.commit()
-        sent += 1
+        for item in items:
+            if result["attempts"] >= 5:
+                break
 
-    cur.close()
-    conn.close()
+            img = item.find("img")
+            if not img:
+                continue
+
+            raw_link = item.get("href")
+            if not raw_link:
+                result["skipped_missing_link"] += 1
+                continue
+
+            link = urljoin(result["source"], raw_link.strip())
+            raw_image = (
+                img.get("data-src")
+                or img.get("data-lazy-src")
+                or img.get("data-original")
+                or img.get("src")
+            )
+            if not raw_image:
+                result["skipped_missing_image"] += 1
+                continue
+
+            image_url = urljoin(link, raw_image.strip())
+            result["candidates_found"] += 1
+
+            cur.execute("SELECT 1 FROM messages WHERE message=%s LIMIT 1", (link,))
+            if cur.fetchone():
+                result["duplicate_stop"] = True
+                break
+
+            title = (item.get("title") or img.get("alt") or "جديد").strip()
+            genres, country = get_series_details(scraper, link)
+            genre_text = "، ".join(genres) if genres else "غير محدد"
+            country_text = country if country else "غير محدد"
+            caption = (
+                f"📺 {title}\n"
+                f"🎭 النوع: {genre_text}\n"
+                f"🌍 الدولة: {country_text}\n"
+                f"🔥 متاح الآن في الاستراحة!"
+            )
+
+            result["attempts"] += 1
+            ok, details = send_to_whatsapp(image_url, caption)
+            result["send_results"].append({
+                "title": title,
+                "accepted": bool(ok),
+                "details": details
+            })
+
+            if not ok:
+                result["failed"] += 1
+                continue
+
+            cur.execute(
+                "INSERT INTO messages(phone,message,sender,msg_time) VALUES('system',%s,'system',%s)",
+                (link, datetime.now().strftime("%H:%M"))
+            )
+            conn.commit()
+            result["sent"] += 1
+
+        if result["failed"]:
+            result["status"] = "partial" if result["sent"] else "send_failed"
+        elif result["sent"]:
+            result["status"] = "done"
+        elif result["status"] != "no_candidates":
+            result["status"] = "no_new_items" if result["duplicate_stop"] else "no_candidates"
+
+    except Exception as e:
+        result["status"] = "error"
+        result["errors"].append(f"{type(e).__name__}: {e}")
+        print("UPDATE CHECK ERROR:", result["errors"][-1], flush=True)
+
+    finally:
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    print("UPDATE CHECK RESULT: " + json.dumps(result, ensure_ascii=False, default=str), flush=True)
+    return result
 
 
 # ================= ROUTES =================
@@ -176,8 +286,9 @@ def home():
 
 @app.route("/api/check_updates")
 def force_check():
-    check_updates()
-    return jsonify({"status": "done"})
+    result = check_updates()
+    status_code = 502 if result["status"] in ("error", "send_failed") else 200
+    return jsonify(result), status_code
 
 
 @app.route("/api/clear_messages")
