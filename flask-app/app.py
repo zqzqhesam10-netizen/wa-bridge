@@ -14,7 +14,27 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
+APP_CODE_VERSION = "2026-10-29-rss-source-2"
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/feed/").strip()
+
+# Canonicalize a legacy environment value that still points at the Cloudflare-protected HTML page.
+# Keep the deployed app working even if Hostless still has SOURCE_URL=https://tuktukcinemas.com/recent/.
+_source_parts = urlparse(SOURCE_URL)
+if (
+    (_source_parts.hostname or "").lower() in {
+        "tuktukcinemas.com", "www.tuktukcinemas.com",
+        "tuktukhd.com", "www.tuktukhd.com"
+    }
+    and _source_parts.path.rstrip("/").lower() == "/recent"
+):
+    SOURCE_URL = _source_parts._replace(
+        scheme="https",
+        netloc="tuktukcinemas.com",
+        path="/recent/feed/",
+        query="",
+        fragment=""
+    ).geturl()
+
 
 
 # ================= DB =================
@@ -410,6 +430,7 @@ def _extract_series_metadata(markup):
 def check_updates():
     result = {
         "status": "starting",
+        "code_version": APP_CODE_VERSION,
         "source": SOURCE_URL,
         "source_format": None,
         "final_url": None,
@@ -713,6 +734,7 @@ def diagnose_public_sources():
 
     return {
         "status": "diagnostic_complete",
+        "code_version": APP_CODE_VERSION,
         "source": SOURCE_URL,
         "message_sending": False,
         "probes": probes,
