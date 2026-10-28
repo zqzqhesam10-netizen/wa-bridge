@@ -343,7 +343,7 @@ def _probe_public_source(url):
             "challenge-platform"
         )
         details["challenge_detected"] = any(token in lower for token in challenge_markers)
-        details["body_excerpt"] = body[:180].replace("\\r", " ").replace("\\n", " ").strip()
+        details["body_excerpt"] = " ".join(body[:180].split())
         content_type = (details["content_type"] or "").lower()
         body_start = body.lstrip()[:200].lower()
 
