@@ -15,7 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-29-rest-registry-diagnostic-10"
+APP_CODE_VERSION = "2026-10-29-story-extraction-11"
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/feed/").strip()
 
 # Canonicalize a legacy environment value that still points at the Cloudflare-protected HTML page.
@@ -290,6 +290,8 @@ def _parse_source_response(response, source_url):
                 "link": link,
                 "image": image_url,
                 "html": metadata_html,
+                "content_html": encoded or content,
+                "excerpt_html": description,
                 "source_format": source_format
             })
         return items, source_format
@@ -345,6 +347,8 @@ def _parse_source_response(response, source_url):
                 "link": link,
                 "image": image_url or _image_from_html(content_html or excerpt_html, link or source_url),
                 "html": content_html or excerpt_html,
+                "content_html": content_html,
+                "excerpt_html": excerpt_html,
                 "source_format": "json",
                 "post_id": post.get("id"),
                 "slug": post.get("slug") or "",
@@ -696,6 +700,123 @@ def _metadata_from_public_post(item):
     return list(dict.fromkeys(x for x in genres if x)), country, year
 
 
+_STORY_META_KEY_RE = re.compile(
+    r"(?:plot|synopsis|storyline|story|overview|summary|description|قصة|ملخص|نبذة|عن\s+العمل)",
+    re.IGNORECASE
+)
+_STORY_LABEL_RE = re.compile(
+    r"^\s*(?:قصة(?:\s+(?:الفيلم|المسلسل|العمل|الأنمي|الانمي))?|"
+    r"ملخص(?:\s+(?:الفيلم|المسلسل|العمل))?|نبذة(?:\s+عن\s+العمل)?|"
+    r"القصة|the\s+story|storyline|synopsis|plot|overview|summary)"
+    r"\s*[:：\-–—]?\s*(.*)$",
+    re.IGNORECASE
+)
+_STORY_JUNK_RE = re.compile(
+    r"(?:مشاهدة\s+مباشرة|شاهد\s+الآن|تحميل\s+الآن|جودة\s+(?:عالية|عاليه)|"
+    r"السيرفر|سيرفر\s+\d+|اختر\s+السيرفر|روابط\s+المشاهدة|"
+    r"اضغط\s+هنا|للمشاهدة|adsbygoogle|jwplayer|video-js|iframe|"
+    r"عرض\s+المزيد|قد\s+يعجبك\s+أيضاً|قد\s+يعجبك\s+ايضا|"
+    r"جميع\s+الحقوق\s+محفوظة)",
+    re.IGNORECASE
+)
+
+
+def _clean_story_text(value):
+    text = BeautifulSoup(str(value or ""), "html.parser").get_text(" ", strip=True)
+    text = re.sub(r"\[[^\]]{0,80}\]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _trim_story(value, max_chars=650):
+    text = _clean_story_text(value)
+    if not text:
+        return ""
+    text = re.sub(r"^(?:القصة|قصة\s+(?:الفيلم|المسلسل|العمل)|ملخص|الملخص|synopsis|plot|story)\s*[:：\-–—]?\s*",
+                  "", text, flags=re.IGNORECASE).strip()
+    if len(text) > max_chars:
+        cut = text.rfind(" ", 0, max_chars + 1)
+        if cut < int(max_chars * 0.65):
+            cut = max_chars
+        text = text[:cut].rstrip(" ،,؛;:-") + "…"
+    return text
+
+
+def _extract_story(item, max_chars=650):
+    """Extract a plot only from public text; never invent a synopsis."""
+    if not isinstance(item, dict):
+        return "", "unavailable"
+
+    # First look for explicitly-named public metadata keys.
+    explicit_values = []
+    for key, value in _metadata_scalars(item.get("public_meta") or {}):
+        clean_key = re.sub(r"[_\-.]+", " ", key).strip()
+        clean_key = re.sub(r"\[\d+\]", " ", clean_key)
+        if not _STORY_META_KEY_RE.search(clean_key):
+            continue
+        if re.search(r"(?:enable|disable|hide|show|layout|color|font|player|ads?|footnotes?)", clean_key, re.I):
+            continue
+        if isinstance(value, str):
+            text = _clean_story_text(value)
+            if len(text) >= 45 and not _STORY_JUNK_RE.search(text):
+                explicit_values.append((len(text), text, f"public_meta:{clean_key}"))
+    if explicit_values:
+        _, value, source = max(explicit_values, key=lambda entry: entry[0])
+        return _trim_story(value, max_chars), source
+
+    # Inspect the content and excerpt separately. If the text explicitly labels a
+    # story/synopsis section, take that before considering generic descriptive paragraphs.
+    for source_key, source_name in (
+        ("content_html", "public_content"),
+        ("excerpt_html", "public_excerpt"),
+        ("html", "public_html")
+    ):
+        markup = item.get(source_key) or ""
+        if not markup:
+            continue
+        soup = BeautifulSoup(str(markup), "html.parser")
+        for node in soup.find_all(["script", "style", "noscript", "iframe", "video", "audio", "button",
+                                   "nav", "footer", "header", "form", "svg", "canvas"]):
+            node.decompose()
+
+        paragraphs = []
+        # Avoid nested div text being repeated: extract paragraphs and list items first.
+        for node in soup.find_all(["p", "blockquote", "li"]):
+            text = " ".join(node.get_text(" ", strip=True).split())
+            if not text or len(text) < 45 or _STORY_JUNK_RE.search(text):
+                continue
+            if re.search(r"(?:الحلقة\s+\d+|الموسم\s+\d+|سنة\s+(?:الإنتاج|الانتاج)|دولة\s+(?:المسلسل|الفيلم)|الأنواع|الانواع)\s*[:：]", text):
+                continue
+            paragraphs.append(text)
+
+        # Labelled paragraphs may contain the plot directly.
+        for paragraph in paragraphs:
+            match = _STORY_LABEL_RE.match(paragraph)
+            if match:
+                labelled_text = (match.group(1) or "").strip()
+                if len(labelled_text) >= 35 and not _STORY_JUNK_RE.search(labelled_text):
+                    return _trim_story(labelled_text, max_chars), f"{source_name}:labelled"
+
+        # A concise excerpt is preferable to a player/technical page dump. From content,
+        # select the most story-like paragraph (not navigation, taxonomy or a long shortcode).
+        if paragraphs:
+            preferred = []
+            for text in paragraphs:
+                normalized = text.casefold()
+                score = len(text)
+                if re.search(r"\b(?:القصة|القصة تدور|تدور أحداث|تدور القصة|يحكي الفيلم|يحكي العمل|تتناول الأحداث|تحكي القصة|بعد أن|عندما|عقب|the story|follows|after|when)\b", normalized):
+                    score += 250
+                if re.search(r"(?:تحميل|مشاهدة|سيرفر|جودة|الرابط|الموقع الرسمي|إعلان تشويقي)", text, re.I):
+                    score -= 250
+                if score > 0:
+                    preferred.append((score, text))
+            if preferred:
+                _, story = max(preferred, key=lambda entry: entry[0])
+                return _trim_story(story, max_chars), f"{source_name}:paragraph"
+
+    return "", "unavailable"
+
+
 def _infer_work_type(item):
     """Infer the broad title type from its title and public WordPress categories/tags."""
     title = " ".join(str(item.get("title") or "").split()).casefold()
@@ -892,11 +1013,14 @@ def check_updates(max_items=5):
                 # from the title/category rather than a misleading empty placeholder.
                 genre_text = "، ".join(genres) if genres else (work_type or "غير محدد")
                 country_text = country if country else "غير محددة"
+                story_text, story_source = _extract_story(item, max_chars=650)
+                story_line = f"📖 القصة: {story_text}" if story_text else "📖 القصة: غير متاحة في المصدر العام"
                 caption = (
                     f"📺 {title}\n"
                     f"{year_line}\n"
                     f"🎭 النوع: {genre_text}\n"
                     f"🌍 الدولة: {country_text}\n"
+                    f"{story_line}\n"
                     f"🔥 متاح الآن في الاستراحة!"
                 )
 
@@ -911,6 +1035,8 @@ def check_updates(max_items=5):
                     "genres": genres,
                     "work_type": work_type or None,
                     "country": country_text,
+                    "story": story_text or None,
+                    "story_source": story_source,
                     "metadata_page_status": detail_status,
                     "accepted": bool(ok),
                     "details": details
@@ -1233,6 +1359,7 @@ def diagnose_public_sources():
             work_type = _infer_work_type(item)
             public_meta = item.get("public_meta") or {}
             term_records = item.get("terms") or []
+            story_preview, story_source = _extract_story(item, max_chars=360)
             source_inspection["sample_items"].append({
                 "title": item_title,
                 "link": item_link,
@@ -1244,6 +1371,9 @@ def diagnose_public_sources():
                 "work_type": work_type or None,
                 "genres": genres,
                 "country": country or None,
+                "story_available": bool(story_preview),
+                "story_source": story_source,
+                "story_preview": story_preview or None,
                 "metadata_page_status": detail_status,
                 "public_meta_keys": sorted(str(key) for key in public_meta.keys())[:60],
                 "public_terms": [
@@ -1268,6 +1398,9 @@ def diagnose_public_sources():
         )
         source_inspection["items_with_detailed_genres_in_sample"] = sum(
             1 for item in source_inspection["sample_items"] if item.get("genres")
+        )
+        source_inspection["items_with_story_in_sample"] = sum(
+            1 for item in source_inspection["sample_items"] if item.get("story_available")
         )
         source_inspection["items_with_year_or_publication_year_in_sample"] = sum(
             1 for item in source_inspection["sample_items"]
