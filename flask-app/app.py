@@ -12,6 +12,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
+SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/").strip()
 
 
 # ================= DB =================
@@ -138,7 +139,11 @@ def get_series_details(scraper, url):
 def check_updates():
     result = {
         "status": "starting",
-        "source": "https://tuktukhd.com/recent/",
+        "source": SOURCE_URL,
+        "final_url": None,
+        "response_content_type": None,
+        "response_server": None,
+        "response_snippet": None,
         "group_id": GROUP_ID,
         "node_url_configured": bool(NODE_URL),
         "source_http_status": None,
@@ -167,8 +172,27 @@ def check_updates():
         scraper = cloudscraper.create_scraper()
         response = scraper.get(result["source"], timeout=30)
         result["source_http_status"] = response.status_code
-        response.raise_for_status()
+        result["final_url"] = response.url
+        result["response_content_type"] = response.headers.get("Content-Type")
+        result["response_server"] = response.headers.get("Server")
         response.encoding = "utf-8"
+
+        if not response.ok:
+            error_text = BeautifulSoup(response.text[:5000], "html.parser").get_text(" ", strip=True)
+            result["response_snippet"] = error_text[:300]
+            print(
+                "SOURCE HTTP ERROR: "
+                + json.dumps({
+                    "status": response.status_code,
+                    "requested_url": result["source"],
+                    "final_url": response.url,
+                    "content_type": result["response_content_type"],
+                    "server": result["response_server"],
+                    "body_excerpt": result["response_snippet"]
+                }, ensure_ascii=False),
+                flush=True
+            )
+        response.raise_for_status()
 
         body_lower = response.text.lower()
         challenge_markers = (
