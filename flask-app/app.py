@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import requests, os, psycopg2
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
@@ -14,7 +14,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-29-rss-fallback-3"
+APP_CODE_VERSION = "2026-10-29-rss-fallback-4"
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/feed/").strip()
 
 # Canonicalize a legacy environment value that still points at the Cloudflare-protected HTML page.
@@ -427,11 +427,12 @@ def _extract_series_metadata(markup):
     return genres, country
 
 
-def check_updates():
+def check_updates(max_items=5):
     result = {
         "status": "starting",
         "code_version": APP_CODE_VERSION,
         "source": SOURCE_URL,
+        "max_items": max(1, min(5, int(max_items))),
         "effective_source_url": SOURCE_URL,
         "fallback_source_url": None,
         "fallback_error": None,
@@ -538,7 +539,7 @@ def check_updates():
             result["errors"].append("The source was reachable, but the selected feed contained no parseable items.")
         else:
             for item in items:
-                if result["attempts"] >= 5:
+                if result["attempts"] >= result["max_items"]:
                     break
 
                 link = (item.get("link") or "").strip()
@@ -822,7 +823,24 @@ def source_diagnostic():
 
 @app.route("/api/check_updates")
 def force_check():
-    result = check_updates()
+    raw_limit = request.args.get("limit", "5")
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        return jsonify({
+            "status": "invalid_limit",
+            "error": "limit must be an integer from 1 to 5",
+            "allowed_limits": [1, 2, 3, 4, 5],
+            "message_sending": False
+        }), 400
+    if limit < 1 or limit > 5:
+        return jsonify({
+            "status": "invalid_limit",
+            "error": "limit must be an integer from 1 to 5",
+            "allowed_limits": [1, 2, 3, 4, 5],
+            "message_sending": False
+        }), 400
+    result = check_updates(max_items=limit)
     status_code = 502 if result["status"] in ("error", "send_failed") else 200
     return jsonify(result), status_code
 
