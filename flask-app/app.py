@@ -8,8 +8,8 @@ app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-NODE_URL = "https://wa-bridge-8lia.onrender.com/send"
-GROUP_ID = "120363429067223078@g.us"
+NODE_URL = os.environ.get("NODE_URL", "").strip()
+GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
 
 
 # ================= DB =================
@@ -42,7 +42,9 @@ def init_db():
 def send_to_whatsapp(image, caption):
 
     try:
-        requests.post(
+        if not NODE_URL:
+            raise RuntimeError("NODE_URL environment variable is not configured")
+        response = requests.post(
             NODE_URL,
             json={
                 "groupId": GROUP_ID,
@@ -51,8 +53,11 @@ def send_to_whatsapp(image, caption):
             },
             timeout=60
         )
+        response.raise_for_status()
+        return True
     except Exception as e:
         print("SEND ERROR:", e)
+        return False
 
 
 # ================= SCRAPER =================
@@ -148,7 +153,8 @@ def check_updates():
             f"🔥 متاح الآن في الاستراحة!"
         )
 
-        send_to_whatsapp(img_url, msg)
+        if not send_to_whatsapp(img_url, msg):
+            continue
 
         cur.execute(
             "INSERT INTO messages(phone,message,sender,msg_time) VALUES('system',%s,'system',%s)",
@@ -196,4 +202,4 @@ def test():
 
 if __name__ == "__main__":
     init_db()
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
