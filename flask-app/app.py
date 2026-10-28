@@ -15,7 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-29-public-api-metadata-8"
+APP_CODE_VERSION = "2026-10-29-public-metadata-type-year-9"
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/feed/").strip()
 
 # Canonicalize a legacy environment value that still points at the Cloudflare-protected HTML page.
@@ -569,6 +569,7 @@ _COUNTRY_ALIASES = [
 ]
 
 _GENRE_ALIASES = [
+    (("أنمي", "انمي", "الأنمي", "الانمي", "الأنميات", "الانميات", "anime"), "أنمي"),
     (("دراما", "drama"), "دراما"),
     (("كوميدي", "كوميديا", "comedy", "comedies"), "كوميديا"),
     (("أكشن", "اكشن", "action"), "أكشن"),
@@ -693,6 +694,48 @@ def _metadata_from_public_post(item):
     # Never substitute the WordPress post publication date for a production/release year.
     year = year or meta_year or _extract_year(title=title, url=url, markup=markup)
     return list(dict.fromkeys(x for x in genres if x)), country, year
+
+
+def _infer_work_type(item):
+    """Infer the broad title type from its title and public WordPress categories/tags."""
+    title = " ".join(str(item.get("title") or "").split()).casefold()
+    terms = item.get("terms") or []
+    names = [
+        " ".join(str(term.get("name") or "").split()).casefold()
+        for term in terms if isinstance(term, dict) and term.get("name")
+    ]
+    taxonomy_text = " ".join(names)
+    slug = str(item.get("slug") or urlparse(str(item.get("link") or "")).path).casefold()
+
+    # Use anime/animation categories first to avoid classifying anime episodes as generic series.
+    if (
+        re.search(r"\b(?:انمي|أنمي|الانميات|الأنميات|anime)\b", title + " " + taxonomy_text)
+        or "رسوم متحركة" in taxonomy_text
+        or "animation" in taxonomy_text
+    ):
+        return "أنمي"
+
+    if (
+        re.search(r"^\s*(?:فيلم|الفيلم)\b", title)
+        or re.search(r"\b(?:أفلام|افلام|فيلم|films?|movies?)\b", taxonomy_text)
+    ):
+        return "فيلم"
+
+    if (
+        re.search(r"^\s*(?:مسلسل|المسلسل)\b", title)
+        or re.search(r"\b(?:حلقات|مسلسلات|مسلسل|series|episodes?)\b", taxonomy_text)
+        or re.search(r"s\d{1,2}[-_. ]?e\d{1,3}", slug)
+    ):
+        return "مسلسل"
+
+    return ""
+
+
+def _get_post_publication_year(item):
+    # This is the WordPress post date, not necessarily the production/release year.
+    date_text = _latin_digits(str(item.get("date") or ""))
+    match = _YEAR_RE.search(date_text)
+    return match.group(0) if match else ""
 
 
 def check_updates(max_items=5):
@@ -832,14 +875,26 @@ def check_updates(max_items=5):
                 # Use the public WordPress API data first. The theme page is Cloudflare-blocked
                 # (HTTP 403), so do not stall polling by retrying an endpoint known to be inaccessible.
                 genres, country, year = _metadata_from_public_post(item)
+                work_type = _infer_work_type(item)
                 detail_status = "public_api_only_page_blocked"
                 year = year or _extract_year(title=title, url=link, markup=metadata_html)
-                genre_text = "، ".join(genres) if genres else "غير محدد"
+                publication_year = _get_post_publication_year(item)
+                if year:
+                    year_line = f"📅 سنة العمل: {year}"
+                    year_source = "work_year"
+                elif publication_year:
+                    year_line = f"🗓️ سنة الإضافة: {publication_year}"
+                    year_source = "post_publication_year"
+                else:
+                    year_line = "📅 سنة العمل: غير منشورة"
+                    year_source = "unavailable"
+                # If detailed genres are not exposed publicly, use the actual broad work type
+                # from the title/category rather than a misleading empty placeholder.
+                genre_text = "، ".join(genres) if genres else (work_type or "غير محدد")
                 country_text = country if country else "غير محددة"
-                year_text = year if year else "غير محددة"
                 caption = (
                     f"📺 {title}\n"
-                    f"📅 السنة: {year_text}\n"
+                    f"{year_line}\n"
                     f"🎭 النوع: {genre_text}\n"
                     f"🌍 الدولة: {country_text}\n"
                     f"🔥 متاح الآن في الاستراحة!"
@@ -850,8 +905,11 @@ def check_updates(max_items=5):
                 result["send_results"].append({
                     "title": title,
                     "link": link,
-                    "year": year_text,
+                    "year": year or None,
+                    "year_source": year_source,
+                    "publication_year": publication_year or None,
                     "genres": genres,
+                    "work_type": work_type or None,
                     "country": country_text,
                     "metadata_page_status": detail_status,
                     "accepted": bool(ok),
@@ -1055,6 +1113,8 @@ def diagnose_public_sources():
             # and inspect the public post fields/terms instead of repeating that request.
             detail_status = "public_api_only_page_blocked"
             year = year or _extract_year(title=item_title, url=item_link, markup=item_html)
+            publication_year = _get_post_publication_year(item)
+            work_type = _infer_work_type(item)
             public_meta = item.get("public_meta") or {}
             term_records = item.get("terms") or []
             source_inspection["sample_items"].append({
@@ -1063,6 +1123,9 @@ def diagnose_public_sources():
                 "has_image": bool(item.get("image")),
                 "image_host": urlparse(item["image"]).hostname if item.get("image") else None,
                 "year": year or None,
+                "year_source": "work_year" if year else ("post_publication_year" if publication_year else "unavailable"),
+                "publication_year": publication_year or None,
+                "work_type": work_type or None,
                 "genres": genres,
                 "country": country or None,
                 "metadata_page_status": detail_status,
@@ -1078,7 +1141,18 @@ def diagnose_public_sources():
             })
         source_inspection["items_with_metadata_in_sample"] = sum(
             1 for item in source_inspection["sample_items"]
-            if item.get("year") and item.get("genres") and item.get("country")
+            if item.get("year") or item.get("publication_year") or item.get("genres")
+            or item.get("work_type") or item.get("country")
+        )
+        source_inspection["items_with_work_type_in_sample"] = sum(
+            1 for item in source_inspection["sample_items"] if item.get("work_type")
+        )
+        source_inspection["items_with_country_in_sample"] = sum(
+            1 for item in source_inspection["sample_items"] if item.get("country")
+        )
+        source_inspection["items_with_year_or_publication_year_in_sample"] = sum(
+            1 for item in source_inspection["sample_items"]
+            if item.get("year") or item.get("publication_year")
         )
         response.close()
     except Exception as exc:
@@ -1093,11 +1167,10 @@ def diagnose_public_sources():
             )
         else:
             next_step = (
-                "Feed items and images are available. Metadata extraction now checks the public WordPress REST fields, "
-                "public custom-meta keys, and embedded taxonomy terms without requesting the blocked single-item pages. "
-                "Inspect sample_items.public_terms and sample_items.public_meta_keys to see which public genre/country/year "
-                "fields the site exposes. Automatic polling is enabled every 30 seconds, up to 5 newest unrecorded "
-                "items per check. This diagnostic did not send messages."
+                "Feed items and images are available. The diagnostic now reports work year versus post-publication year, "
+                "broad work type inferred from title/categories, public genres and country. A publication year is explicitly "
+                "labelled as 'سنة الإضافة', not as the work's release year. Automatic polling is enabled every 30 seconds, "
+                "up to 5 newest unrecorded items per check. This diagnostic did not send messages."
             )
     elif source_inspection["items_found"]:
         next_step = (
