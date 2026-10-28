@@ -15,7 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-29-story-extraction-11"
+APP_CODE_VERSION = "2026-10-29-release-year-rating-12"
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/feed/").strip()
 
 # Canonicalize a legacy environment value that still points at the Cloudflare-protected HTML page.
@@ -454,6 +454,19 @@ _YEAR_LABEL_RE = re.compile(
 
 
 def _extract_year(title="", url="", markup=""):
+    # Prefer the site's explicit release-year taxonomy URL, for example:
+    # <a href="https://tuktukcinemas.com/release-year/2026/">2026</a>
+    # This is parsed locally from source HTML; no external metadata lookup is made.
+    if markup:
+        soup = BeautifulSoup(str(markup), "html.parser")
+        for anchor in soup.find_all("a", href=True):
+            href_path = urlparse(str(anchor.get("href") or "")).path
+            if not re.search(r"(?:^|/)release-year/", href_path, re.IGNORECASE):
+                continue
+            match = _YEAR_RE.search(_latin_digits(href_path))
+            if match:
+                return match.group(0)
+
     title_text = _latin_digits(BeautifulSoup(str(title or ""), "html.parser").get_text(" ", strip=True))
     match = _YEAR_RE.search(title_text)
     if match:
@@ -859,6 +872,36 @@ def _get_post_publication_year(item):
     return match.group(0) if match else ""
 
 
+def _extract_rating(item):
+    """Read the site's displayed rating from its own HTML, without calling TMDB."""
+    if not isinstance(item, dict):
+        return "", "unavailable"
+
+    # The REST API may expose body and excerpt in separate fields. Inspect only
+    # markup already delivered by the source API/feed; never request the TMDB URL.
+    for source_key in ("content_html", "excerpt_html", "html"):
+        markup = item.get(source_key) or ""
+        if not markup:
+            continue
+        soup = BeautifulSoup(str(markup), "html.parser")
+        for anchor in soup.find_all("a", href=True):
+            parsed = urlparse(str(anchor.get("href") or ""))
+            host = (parsed.hostname or "").casefold().rstrip(".")
+            if host.startswith("www."):
+                host = host[4:]
+            if host != "themoviedb.org":
+                continue
+
+            # Site markup displays the rating in a <strong>, e.g. <strong>4</strong>.
+            for node in anchor.find_all("strong"):
+                raw_value = _latin_digits(node.get_text(" ", strip=True)).strip()
+                match = re.fullmatch(r"(?:10(?:[.,]0{1,3})?|[0-9](?:[.,][0-9]{1,3})?)", raw_value)
+                if match:
+                    return match.group(0).replace(",", "."), f"{source_key}:embedded_rating_anchor"
+
+    return "", "unavailable"
+
+
 def check_updates(max_items=5):
     result = {
         "status": "starting",
@@ -1015,11 +1058,14 @@ def check_updates(max_items=5):
                 country_text = country if country else "غير محددة"
                 story_text, story_source = _extract_story(item, max_chars=650)
                 story_line = f"📖 القصة: {story_text}" if story_text else "📖 القصة: غير متاحة في المصدر العام"
+                rating, rating_source = _extract_rating(item)
+                rating_line = f"⭐ التقييم: {rating}" if rating else "⭐ التقييم: غير متاح في بيانات المصدر العامة"
                 caption = (
                     f"📺 {title}\n"
                     f"{year_line}\n"
                     f"🎭 النوع: {genre_text}\n"
                     f"🌍 الدولة: {country_text}\n"
+                    f"{rating_line}\n"
                     f"{story_line}\n"
                     f"🔥 متاح الآن في الاستراحة!"
                 )
@@ -1035,6 +1081,8 @@ def check_updates(max_items=5):
                     "genres": genres,
                     "work_type": work_type or None,
                     "country": country_text,
+                    "rating": rating or None,
+                    "rating_source": rating_source,
                     "story": story_text or None,
                     "story_source": story_source,
                     "metadata_page_status": detail_status,
@@ -1360,6 +1408,7 @@ def diagnose_public_sources():
             public_meta = item.get("public_meta") or {}
             term_records = item.get("terms") or []
             story_preview, story_source = _extract_story(item, max_chars=360)
+            rating, rating_source = _extract_rating(item)
             source_inspection["sample_items"].append({
                 "title": item_title,
                 "link": item_link,
@@ -1374,6 +1423,9 @@ def diagnose_public_sources():
                 "story_available": bool(story_preview),
                 "story_source": story_source,
                 "story_preview": story_preview or None,
+                "rating": rating or None,
+                "rating_available": bool(rating),
+                "rating_source": rating_source,
                 "metadata_page_status": detail_status,
                 "public_meta_keys": sorted(str(key) for key in public_meta.keys())[:60],
                 "public_terms": [
@@ -1401,6 +1453,9 @@ def diagnose_public_sources():
         )
         source_inspection["items_with_story_in_sample"] = sum(
             1 for item in source_inspection["sample_items"] if item.get("story_available")
+        )
+        source_inspection["items_with_rating_in_sample"] = sum(
+            1 for item in source_inspection["sample_items"] if item.get("rating_available")
         )
         source_inspection["items_with_year_or_publication_year_in_sample"] = sum(
             1 for item in source_inspection["sample_items"]
