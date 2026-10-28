@@ -890,10 +890,18 @@ def diagnose_public_sources():
         source_inspection["error"] = f"{type(exc).__name__}: {exc}"
 
     if source_inspection["items_found"] and source_inspection["items_with_images"]:
-        next_step = (
-            "The source parser found feed items and image URLs. This diagnostic is read-only. "
-            "Call /api/check_updates only once to test delivery; it may send up to 5 new items."
-        )
+        if source_inspection.get("items_with_metadata_in_sample", 0):
+            next_step = (
+                "Feed items, images, and year/genre/country fields were found in the sampled items. "
+                "Automatic polling is enabled every 30 seconds and processes up to 5 newest unrecorded items per check. "
+                "This diagnostic did not send messages."
+            )
+        else:
+            next_step = (
+                "Feed items and images are available. The sampled detail pages did not provide all metadata fields; "
+                "inspect sample_items.metadata_page_status. Automatic polling is configured for every 30 seconds, "
+                "up to 5 newest unrecorded items per check. This diagnostic did not send messages."
+            )
     elif source_inspection["items_found"]:
         next_step = (
             "The source parser found items but no image URLs. Do not call /api/check_updates yet; "
