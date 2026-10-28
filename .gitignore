@@ -9,3 +9,8 @@ auth_info*/
 .env
 .env.*
 !.env.example
+
+# Python runtime and generated files
+.venv/
+__pycache__/
+*.py[cod]

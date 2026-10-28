@@ -188,6 +188,31 @@ app.post("/send", async (req, res) => {
     }
 });
 
+// ================= FLASK HELPER PROXY =================
+// Keep the existing Flask helper endpoints on the same public app URL.
+// The Flask process listens only on loopback inside this container.
+const FLASK_INTERNAL_PORT = process.env.FLASK_INTERNAL_PORT || "5001";
+async function proxyToFlask(req, res) {
+    try {
+        const target = `http://127.0.0.1:${FLASK_INTERNAL_PORT}${req.originalUrl}`;
+        const upstream = await fetch(target, { method: req.method });
+        const body = await upstream.text();
+        const contentType = upstream.headers.get("content-type");
+        if (contentType) res.set("Content-Type", contentType);
+        return res.status(upstream.status).send(body);
+    } catch (error) {
+        console.error("Flask helper proxy failed:", error.message);
+        return res.status(502).json({
+            status: "error",
+            message: "Flask helper is temporarily unavailable"
+        });
+    }
+}
+
+app.get("/api/check_updates", proxyToFlask);
+app.get("/api/clear_messages", proxyToFlask);
+app.get("/api/send_test", proxyToFlask);
+
 // ================= SERVER =================
 
 const PORT =

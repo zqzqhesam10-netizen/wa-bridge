@@ -1,8 +1,8 @@
 build:
-  command: "npm install"
-  system: auto
+  system: docker
 
-start_command: "node index.js"
+dockerfile_path: "./Dockerfile"
+start_command: "node start.js"
 
 scaling:
   trigger: http_requests
