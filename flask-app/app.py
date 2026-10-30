@@ -15,7 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-31-myseed-clear-messages-19"
+APP_CODE_VERSION = "2026-10-31-myseed-clear-saved-links-20"
 MYSEED_RECENT_URL = "https://m.myseed.tv/recently/"
 MYSEED_ALLOWED_HOSTS = {"m.myseed.tv", "myseed.tv", "www.myseed.tv"}
 SOURCE_URL = os.environ.get("SOURCE_URL", MYSEED_RECENT_URL).strip()
@@ -1264,6 +1264,7 @@ def check_updates(max_items=5):
     }
     conn = None
     cur = None
+    replay_mode = False
 
     try:
         if not DATABASE_URL:
@@ -1376,6 +1377,17 @@ def check_updates(max_items=5):
                 result["baseline_initialized"] = True
                 result["baseline_items_recorded"] = baseline_count
                 result["status"] = "baseline_initialized"
+
+        # When clear_messages explicitly resets the saved URLs, scan through
+        # already re-recorded items on later 5-item batches instead of stopping
+        # at the first known link. The marker is removed after a complete scan.
+        replay_marker = "__MYSEED_REPLAY_ALL_V1__"
+        cur.execute(
+            "SELECT 1 FROM processed_links WHERE link=%s LIMIT 1",
+            (replay_marker,)
+        )
+        replay_mode = bool(cur.fetchone())
+
         if items and not result.get("baseline_initialized"):
             for item in items:
                 if result["attempts"] >= result["max_items"]:
@@ -1389,6 +1401,8 @@ def check_updates(max_items=5):
                 # Feed entries are newest-first: stop at the first known link before checking image availability.
                 cur.execute("SELECT 1 FROM processed_links WHERE link=%s LIMIT 1", (link,))
                 if cur.fetchone():
+                    if replay_mode:
+                        continue
                     result["duplicate_stop"] = True
                     break
 
@@ -1492,6 +1506,17 @@ def check_updates(max_items=5):
                 )
                 conn.commit()
                 result["sent"] += 1
+
+        # Once the entire current listing has been scanned with fewer than
+        # max_items attempts and no send failures, leave replay mode. If the
+        # batch limit was reached or a send failed, retain the marker for retry.
+        if replay_mode and result["attempts"] < result["max_items"] and result["failed"] == 0:
+            cur.execute(
+                "DELETE FROM processed_links WHERE link=%s",
+                ("__MYSEED_REPLAY_ALL_V1__",)
+            )
+            conn.commit()
+            result["replay_scan_complete"] = True
 
         if result["failed"]:
             result["status"] = "partial" if result["sent"] else "send_failed"
@@ -2290,14 +2315,15 @@ def force_check():
 
 @app.route("/api/clear_messages")
 def clear():
-    # Clear only the visible/send history. The processed_links ledger is kept
-    # separately, so the next poll does not resend previously handled MySeed items.
+    # This endpoint intentionally clears saved source URLs so they can be
+    # processed again. Replay mode lets the normal poller reprocess the list
+    # in batches without resetting the first-run baseline.
     if not _CHECK_LOCK.acquire(blocking=False):
         return jsonify({
             "status": "check_in_progress",
             "message_sending": False,
             "database_writes": False,
-            "message": "An update check is running; no records were cleared. Retry after it finishes."
+            "message": "An update check is running; no saved links were cleared. Retry after it finishes."
         }), 409
 
     conn = None
@@ -2305,20 +2331,38 @@ def clear():
     try:
         conn = db()
         cur = conn.cursor()
+
         cur.execute("DELETE FROM messages")
-        deleted_records = cur.rowcount
-        cur.execute("SELECT COUNT(*) FROM processed_links WHERE link <> %s", ("__MYSEED_BASELINE_V1__",))
-        seen_links_preserved = cur.fetchone()[0]
+        deleted_history_records = cur.rowcount
+
+        baseline_marker = "__MYSEED_BASELINE_V1__"
+        replay_marker = "__MYSEED_REPLAY_ALL_V1__"
+
+        cur.execute(
+            "DELETE FROM processed_links WHERE link NOT IN (%s, %s)",
+            (baseline_marker, replay_marker)
+        )
+        cleared_links_count = cur.rowcount
+
+        now_text = datetime.now().strftime("%H:%M")
+        cur.execute(
+            "INSERT INTO processed_links(link,created_at) VALUES(%s,%s) ON CONFLICT (link) DO NOTHING",
+            (baseline_marker, now_text)
+        )
+        cur.execute(
+            "INSERT INTO processed_links(link,created_at) VALUES(%s,%s) ON CONFLICT (link) DO NOTHING",
+            (replay_marker, now_text)
+        )
         conn.commit()
 
         return jsonify({
             "status": "cleared",
-            "deleted_records": deleted_records,
-            "seen_links_preserved": seen_links_preserved,
-            "dedupe_ledger_preserved": True,
+            "deleted_history_records": deleted_history_records,
+            "cleared_saved_links": cleared_links_count,
+            "replay_queue_active": True,
             "message_sending": False,
             "database_writes": True,
-            "message": "Message history cleared. Previously processed source links were retained to prevent duplicate sends."
+            "message": "Saved source links were cleared. The automatic poller will now treat the current MySeed listing as new and process it in batches of up to five."
         }), 200
     except Exception as exc:
         if conn is not None:
