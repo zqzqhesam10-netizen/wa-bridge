@@ -15,7 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-30-myseed-live-source-15"
+APP_CODE_VERSION = "2026-10-30-myseed-story-genre-polish-16"
 MYSEED_RECENT_URL = "https://m.myseed.tv/recently/"
 MYSEED_ALLOWED_HOSTS = {"m.myseed.tv", "myseed.tv", "www.myseed.tv"}
 SOURCE_URL = os.environ.get("SOURCE_URL", MYSEED_RECENT_URL).strip()
@@ -596,7 +596,9 @@ _GENRE_ALIASES = [
     (("وثائقي", "وثائقية", "documentary"), "وثائقي"),
     (("رسوم متحركة", "animation", "animated"), "رسوم متحركة"),
     (("فانتازيا", "fantasy"), "فانتازيا"),
-    (("تاريخي", "تاريخية", "history", "historical"), "تاريخي")
+    (("تاريخي", "تاريخية", "history", "historical"), "تاريخي"),
+    (("western", "ويسترن", "الغرب الأمريكي", "الغرب الامريكي"), "ويسترن"),
+    (("tv movie", "television movie", "فيلم تلفزيوني"), "فيلم تلفزيوني")
 ]
 
 
@@ -1092,8 +1094,11 @@ def _myseed_extract_detail(item, soup):
     story = _clean_story_text(story)
     # MySeed's description starts with SEO wording. Keep the actual plot after its
     # explicit "حيث تدور الأحداث حول" clause when present.
+    # Remove MySeed's SEO lead-in through the first comma, and optional "حيث".
+    # Keep the actual plot opening whether it says "تدور الأحداث", "تنطلق مهمة",
+    # "يخوض..." or another verb; don't require one guessed sentence pattern.
     story = re.sub(
-        r"^مشاهدة\s+وتحميل\s+.+?(?:،|,)\s*(?:حيث\s+تدور\s+الأحداث\s+حول|حيث\s+تدور\s+الاحداث\s+حول)\s*",
+        r"^مشاهدة\s+وتحميل\s+.+?(?:،|,)\s*(?:حيث\s*)?",
         "",
         story,
         count=1,
