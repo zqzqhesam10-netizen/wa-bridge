@@ -15,7 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-30-myseed-readonly-probe-13"
+APP_CODE_VERSION = "2026-10-30-separate-work-type-and-genres-14"
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/feed/").strip()
 
 # Canonicalize a legacy environment value that still points at the Cloudflare-protected HTML page.
@@ -1052,9 +1052,10 @@ def check_updates(max_items=5):
                 else:
                     year_line = "📅 سنة العمل: غير منشورة"
                     year_source = "unavailable"
-                # If detailed genres are not exposed publicly, use the actual broad work type
-                # from the title/category rather than a misleading empty placeholder.
-                genre_text = "، ".join(genres) if genres else (work_type or "غير محدد")
+                # Keep work format (film/series/anime) separate from actual genres
+                # (Drama/Action/Comedy). Never display "فيلم" as a genre fallback.
+                work_kind_text = work_type or "غير محدد"
+                genre_text = "، ".join(genres) if genres else "غير محدد"
                 country_text = country if country else "غير محددة"
                 story_text, story_source = _extract_story(item, max_chars=650)
                 story_line = f"📖 القصة: {story_text}" if story_text else "📖 القصة: غير متاحة في المصدر العام"
@@ -1063,7 +1064,8 @@ def check_updates(max_items=5):
                 caption = (
                     f"📺 {title}\n"
                     f"{year_line}\n"
-                    f"🎭 النوع: {genre_text}\n"
+                    f"🎬 نوع العمل: {work_kind_text}\n"
+                    f"🎭 التصنيف: {genre_text}\n"
                     f"🌍 الدولة: {country_text}\n"
                     f"{rating_line}\n"
                     f"{story_line}\n"
