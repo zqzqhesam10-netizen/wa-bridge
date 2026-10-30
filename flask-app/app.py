@@ -15,26 +15,20 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-30-separate-work-type-and-genres-14"
-SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/feed/").strip()
+APP_CODE_VERSION = "2026-10-30-myseed-live-source-15"
+MYSEED_RECENT_URL = "https://m.myseed.tv/recently/"
+MYSEED_ALLOWED_HOSTS = {"m.myseed.tv", "myseed.tv", "www.myseed.tv"}
+SOURCE_URL = os.environ.get("SOURCE_URL", MYSEED_RECENT_URL).strip()
 
-# Canonicalize a legacy environment value that still points at the Cloudflare-protected HTML page.
-# Keep the deployed app working even if Hostless still has SOURCE_URL=https://tuktukcinemas.com/recent/.
+# The source migration is intentional: old Hostless SOURCE_URL values for Tuktuk
+# are redirected to MySeed, which has now been verified reachable from Hostless.
 _source_parts = urlparse(SOURCE_URL)
-if (
-    (_source_parts.hostname or "").lower() in {
-        "tuktukcinemas.com", "www.tuktukcinemas.com",
-        "tuktukhd.com", "www.tuktukhd.com"
-    }
-    and _source_parts.path.rstrip("/").lower() == "/recent"
-):
-    SOURCE_URL = _source_parts._replace(
-        scheme="https",
-        netloc="tuktukcinemas.com",
-        path="/recent/feed/",
-        query="",
-        fragment=""
-    ).geturl()
+_source_host = (_source_parts.hostname or "").lower()
+if _source_host in {
+    "tuktukcinemas.com", "www.tuktukcinemas.com",
+    "tuktukhd.com", "www.tuktukhd.com"
+} or _source_host in MYSEED_ALLOWED_HOSTS:
+    SOURCE_URL = MYSEED_RECENT_URL
 
 
 AUTO_POLL_INTERVAL_SECONDS = 30
@@ -902,6 +896,296 @@ def _extract_rating(item):
     return "", "unavailable"
 
 
+
+
+def _myseed_detail_url_allowed(url):
+    parsed = urlparse(str(url or ""))
+    host = (parsed.hostname or "").lower()
+    path = parsed.path.rstrip("/").lower()
+    if host not in MYSEED_ALLOWED_HOSTS or not path or path == "/recently":
+        return False
+    if any(part in path for part in (
+        "/category/", "/tag/", "/page/", "/search/", "/author/",
+        "/genre/", "/country/", "/release-year/", "/language/",
+        "/quality/", "/feed/"
+    )):
+        return False
+    if re.search(r"\.(?:jpg|jpeg|png|webp|gif|svg|css|js|xml)$", path):
+        return False
+    return True
+
+
+def _myseed_card_rating(card):
+    """Read the rating printed in the MySeed listing card; no external rating lookup."""
+    # Prefer a compact element whose class explicitly describes a rating.
+    for node in card.find_all(True):
+        classes = " ".join(node.get("class") or []).casefold()
+        if "rating" not in classes and "star" not in classes:
+            continue
+        node_text = _myseed_text(node, 80)
+        match = re.search(r"(?<!\d)(10|[0-9])(?:[.,](\d{1,2}))?(?!\d)", node_text)
+        if match:
+            value = float(match.group(1) + (("." + match.group(2)) if match.group(2) else ""))
+            if 0 <= value <= 10:
+                return f"{value:g}", "myseed_listing_rating_element"
+
+    # In the verified cards the rating is printed after the genre and before
+    # the episode/quality marker (e.g. "Action & Adventure 7.9 الحلقة 1").
+    card_text = _myseed_text(card, 3500)
+    prefix = re.split(
+        r"(?:الحلقة\s*\d+|الموسم\s*\d+|WEB\s*[- ]?\s*DL|BLU[\s-]?RAY|BLURAY)",
+        card_text,
+        maxsplit=1,
+        flags=re.IGNORECASE
+    )[0]
+    matches = re.findall(r"(?<!\d)(10|[0-9])[.,](\d{1,2})(?!\d)", prefix)
+    for whole, fraction in matches:
+        value = float(f"{whole}.{fraction}")
+        if 0 <= value <= 10:
+            return f"{value:g}", "myseed_listing_card"
+    return "", "unavailable"
+
+
+def _parse_myseed_recent_response(response):
+    """Parse the actual MySeed .item__contents listing cards in page order."""
+    response.raise_for_status()
+    body = response.text or ""
+    lower = body[:12000].casefold()
+    if any(marker in lower for marker in (
+        "just a moment", "enable javascript and cookies to continue",
+        "checking your browser", "cf-chl-", "challenge-platform",
+        "access denied", "request blocked"
+    )):
+        raise RuntimeError("MySeed returned a browser/anti-bot challenge page.")
+
+    soup = BeautifulSoup(body, "html.parser")
+    cards = soup.select(".item__contents")
+    items = []
+    seen = set()
+    for card in cards:
+        detail_url = ""
+        for anchor in card.find_all("a", href=True):
+            candidate = urljoin(response.url, anchor.get("href", ""))
+            if _myseed_detail_url_allowed(candidate):
+                detail_url = candidate
+                break
+        if not detail_url or detail_url in seen:
+            continue
+        seen.add(detail_url)
+
+        image_url = _image_from_html(str(card), response.url)
+        if not image_url:
+            continue
+
+        title = ""
+        for node in card.find_all(["h1", "h2", "h3", "h4"]):
+            candidate_title = _myseed_text(node, 240)
+            if candidate_title and len(candidate_title) > 3:
+                title = candidate_title
+                break
+        if not title:
+            image_node = card.find("img")
+            title = (
+                str((image_node or {}).get("alt") or "").strip()
+                or str((card.find("a") or {}).get("title") or "").strip()
+                or "جديد"
+            )
+
+        rating, rating_source = _myseed_card_rating(card)
+        items.append({
+            "title": title,
+            "link": detail_url,
+            "image": image_url,
+            "html": str(card),
+            "card_text": _myseed_text(card, 3500),
+            "rating": rating or "",
+            "rating_source": rating_source,
+            "source_format": "myseed_html",
+            "myseed": True
+        })
+    return items
+
+
+def _myseed_labeled_li(soup, label):
+    pattern = re.compile(r"^\s*" + re.escape(label) + r"\s*[:：]\s*(.*)$", re.IGNORECASE)
+    for node in soup.find_all("li"):
+        text = _myseed_text(node, 900)
+        match = pattern.match(text)
+        if match:
+            return node, (match.group(1) or "").strip()
+    return None, ""
+
+
+def _myseed_link_values(node, path_prefix):
+    values = []
+    if node is None:
+        return values
+    for anchor in node.find_all("a", href=True):
+        parsed = urlparse(urljoin(MYSEED_RECENT_URL, anchor.get("href", "")))
+        if not parsed.path.casefold().startswith(path_prefix.casefold()):
+            continue
+        value = _myseed_text(anchor, 160)
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
+def _myseed_extract_detail(item, soup):
+    """Extract fields from MySeed's verified detail-page labels and taxonomy links."""
+    title = item.get("title") or "جديد"
+    title_node = soup.find("meta", attrs={"property": "og:title"})
+    if title_node and title_node.get("content"):
+        title = _myseed_text(title_node.get("content"), 260)
+    else:
+        title_node = soup.find("title")
+        if title_node:
+            title = _myseed_text(title_node, 300).split("|")[0].strip() or title
+
+    # The page title is a stable fallback; prefer the content heading if one exists.
+    for heading in soup.find_all(["h1", "h2", "h3"]):
+        heading_text = _myseed_text(heading, 260)
+        if heading_text and re.search(r"(?:فيلم|مسلسل|انمي|أنمي|movie|series|anime)", heading_text, re.I):
+            title = heading_text
+            break
+
+    year_node, year_raw = _myseed_labeled_li(soup, "سنة العرض")
+    year = ""
+    if year_node is not None:
+        for anchor in year_node.find_all("a", href=True):
+            href_path = urlparse(urljoin(MYSEED_RECENT_URL, anchor.get("href", ""))).path
+            if "/release-year/" in href_path.casefold():
+                match = _YEAR_RE.search(_latin_digits(href_path + " " + _myseed_text(anchor, 80)))
+                if match:
+                    year = match.group(0)
+                    break
+        if not year:
+            match = _YEAR_RE.search(_latin_digits(year_raw))
+            year = match.group(0) if match else ""
+
+    country_node, country_raw = _myseed_labeled_li(soup, "بلد العرض")
+    country_values = _myseed_link_values(country_node, "/country/")
+    country = _normalize_country(country_values[0] if country_values else country_raw)
+
+    genre_node, genre_raw = _myseed_labeled_li(soup, "نوع العرض")
+    genre_values = _myseed_link_values(genre_node, "/genre/")
+    if not genre_values and genre_raw:
+        # Keep the field as displayed by the site; normalization maps known genres.
+        genre_values = [genre_raw]
+    genres = []
+    for value in genre_values:
+        normalized = _normalize_genre(value)
+        if normalized:
+            genres.extend([part.strip() for part in normalized.split("،") if part.strip()])
+    genres = list(dict.fromkeys(genres))
+
+    category_node, category_raw = _myseed_labeled_li(soup, "تصنيف العرض")
+    category_values = _myseed_link_values(category_node, "/category/")
+    if not category_values and category_raw:
+        category_values = [category_raw]
+    terms = [{"name": value, "taxonomy": "category"} for value in category_values]
+
+    meta_description = soup.find("meta", attrs={"name": re.compile("^description$", re.I)})
+    story = (meta_description.get("content") or "").strip() if meta_description else ""
+    if not story:
+        og_description = soup.find("meta", attrs={"property": "og:description"})
+        story = (og_description.get("content") or "").strip() if og_description else ""
+    story = _clean_story_text(story)
+    # MySeed's description starts with SEO wording. Keep the actual plot after its
+    # explicit "حيث تدور الأحداث حول" clause when present.
+    story = re.sub(
+        r"^مشاهدة\s+وتحميل\s+.+?(?:،|,)\s*(?:حيث\s+تدور\s+الأحداث\s+حول|حيث\s+تدور\s+الاحداث\s+حول)\s*",
+        "",
+        story,
+        count=1,
+        flags=re.IGNORECASE
+    )
+    if not story:
+        story, _ = _extract_story({
+            "content_html": str(soup),
+            "excerpt_html": "",
+            "html": str(soup),
+            "public_meta": {}
+        }, max_chars=900)
+
+    rating = item.get("rating") or ""
+    rating_source = item.get("rating_source") or "unavailable"
+    if not rating:
+        # Use MySeed's own visitor rating only when it has at least one vote.
+        rating_node = soup.select_one(".star__rating")
+        rating_text = _myseed_text(rating_node, 160) if rating_node else ""
+        match = re.search(
+            r"(\d{1,2}(?:[.,]\d{1,2})?)\s*/\s*10\s*\(\s*(\d+)\s*(?:صوت|أصوات)",
+            rating_text
+        )
+        if match and int(match.group(2)) > 0:
+            value = float(match.group(1).replace(",", "."))
+            if 0 <= value <= 10:
+                rating = f"{value:g}"
+                rating_source = "myseed_visitor_rating"
+
+    work_type = _infer_work_type({
+        "title": title,
+        "link": item.get("link", ""),
+        "terms": terms
+    })
+    item.update({
+        "title": title,
+        "year": year,
+        "genres": genres,
+        "country": country,
+        "work_type": work_type,
+        "terms": terms,
+        "story": _trim_story(story, 650) if story else "",
+        "story_source": "myseed_meta_description" if story else "unavailable",
+        "rating": rating,
+        "rating_source": rating_source,
+        "detail_status": "HTTP_200"
+    })
+    return item
+
+
+def _enrich_myseed_item(item, scraper):
+    """Read one MySeed detail page; never follows TMDB or other external metadata links."""
+    detail_url = item.get("link") or ""
+    if not _myseed_detail_url_allowed(detail_url):
+        item["detail_status"] = "invalid_detail_url"
+        return item
+    detail_response = None
+    try:
+        detail_response = scraper.get(
+            detail_url,
+            timeout=18,
+            allow_redirects=True,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+                "Referer": MYSEED_RECENT_URL
+            }
+        )
+        if not detail_response.ok:
+            item["detail_status"] = f"HTTP_{detail_response.status_code}"
+            return item
+        detail_body = detail_response.text or ""
+        lower = detail_body[:12000].casefold()
+        if any(marker in lower for marker in (
+            "just a moment", "enable javascript and cookies to continue",
+            "checking your browser", "cf-chl-", "challenge-platform",
+            "access denied", "request blocked"
+        )):
+            item["detail_status"] = "challenge"
+            return item
+        soup = BeautifulSoup(detail_body, "html.parser")
+        _myseed_extract_detail(item, soup)
+        return item
+    except Exception as exc:
+        item["detail_status"] = f"{type(exc).__name__}: {exc}"
+        return item
+    finally:
+        if detail_response is not None:
+            detail_response.close()
+
+
+
 def check_updates(max_items=5):
     result = {
         "status": "starting",
@@ -967,8 +1251,12 @@ def check_updates(max_items=5):
             )
             response.raise_for_status()
 
-        items, source_format = _parse_source_response(response, result["source"])
         effective_source_url = result["source"]
+        if (urlparse(response.url or result["source"]).hostname in MYSEED_ALLOWED_HOSTS:
+            items = _parse_myseed_recent_response(response)
+            source_format = "myseed_html"
+        else:
+            items, source_format = _parse_source_response(response, result["source"])
 
         # Some WordPress custom feeds return a valid empty RSS document. When that
         # happens, fall back to the site's publicly reachable posts REST endpoint.
@@ -1012,7 +1300,36 @@ def check_updates(max_items=5):
         if not items:
             result["status"] = "no_candidates"
             result["errors"].append("The source was reachable, but the selected feed contained no parseable items.")
-        else:
+        elif source_format == "myseed_html":
+            # Baseline existing MySeed items once to prevent a source migration from
+            # blasting the WhatsApp group with up to five already-published titles.
+            baseline_marker = "__MYSEED_BASELINE_V1__"
+            cur.execute(
+                "SELECT 1 FROM messages WHERE phone=%s AND sender=%s AND message=%s LIMIT 1",
+                ("myseed-baseline", "system", baseline_marker)
+            )
+            if not cur.fetchone():
+                baseline_count = 0
+                for known_item in items:
+                    known_link = (known_item.get("link") or "").strip()
+                    if not known_link:
+                        continue
+                    cur.execute("SELECT 1 FROM messages WHERE message=%s LIMIT 1", (known_link,))
+                    if not cur.fetchone():
+                        cur.execute(
+                            "INSERT INTO messages(phone,message,sender,msg_time) VALUES('myseed-baseline',%s,'system',%s)",
+                            (known_link, datetime.now().strftime("%H:%M"))
+                        )
+                        baseline_count += 1
+                cur.execute(
+                    "INSERT INTO messages(phone,message,sender,msg_time) VALUES('myseed-baseline',%s,'system',%s)",
+                    (baseline_marker, datetime.now().strftime("%H:%M"))
+                )
+                conn.commit()
+                result["baseline_initialized"] = True
+                result["baseline_items_recorded"] = baseline_count
+                result["status"] = "baseline_initialized"
+        if items and not result.get("baseline_initialized"):
             for item in items:
                 if result["attempts"] >= result["max_items"]:
                     break
@@ -1036,13 +1353,28 @@ def check_updates(max_items=5):
                 result["candidates_found"] += 1
                 title = (item.get("title") or "جديد").strip()
                 metadata_html = item.get("html") or ""
-                # Use the public WordPress API data first. The theme page is Cloudflare-blocked
-                # (HTTP 403), so do not stall polling by retrying an endpoint known to be inaccessible.
-                genres, country, year = _metadata_from_public_post(item)
-                work_type = _infer_work_type(item)
-                detail_status = "public_api_only_page_blocked"
-                year = year or _extract_year(title=title, url=link, markup=metadata_html)
-                publication_year = _get_post_publication_year(item)
+                if item.get("myseed"):
+                    _enrich_myseed_item(item, scraper)
+                    title = (item.get("title") or title).strip()
+                    genres = item.get("genres") or []
+                    country = item.get("country") or ""
+                    year = item.get("year") or ""
+                    work_type = item.get("work_type") or _infer_work_type(item)
+                    detail_status = item.get("detail_status") or "not_fetched"
+                    story_text = item.get("story") or ""
+                    story_source = item.get("story_source") or "unavailable"
+                    rating = item.get("rating") or ""
+                    rating_source = item.get("rating_source") or "unavailable"
+                    publication_year = ""
+                else:
+                    # Retain compatibility for explicitly configured non-MySeed sources.
+                    genres, country, year = _metadata_from_public_post(item)
+                    work_type = _infer_work_type(item)
+                    detail_status = "public_api_only_page_blocked"
+                    year = year or _extract_year(title=title, url=link, markup=metadata_html)
+                    publication_year = _get_post_publication_year(item)
+                    story_text, story_source = _extract_story(item, max_chars=650)
+                    rating, rating_source = _extract_rating(item)
                 if year:
                     year_line = f"📅 سنة العمل: {year}"
                     year_source = "work_year"
@@ -1057,9 +1389,10 @@ def check_updates(max_items=5):
                 work_kind_text = work_type or "غير محدد"
                 genre_text = "، ".join(genres) if genres else "غير محدد"
                 country_text = country if country else "غير محددة"
-                story_text, story_source = _extract_story(item, max_chars=650)
+                if not item.get("myseed"):
+                    story_text, story_source = _extract_story(item, max_chars=650)
+                    rating, rating_source = _extract_rating(item)
                 story_line = f"📖 القصة: {story_text}" if story_text else "📖 القصة: غير متاحة في المصدر العام"
-                rating, rating_source = _extract_rating(item)
                 rating_line = f"⭐ التقييم: {rating}" if rating else "⭐ التقييم: غير متاح في بيانات المصدر العامة"
                 caption = (
                     f"📺 {title}\n"
@@ -1796,6 +2129,76 @@ def myseed_diagnostic():
     # Read-only MySeed connectivity and DOM probe. No WhatsApp sends and no database writes.
     result = diagnose_myseed_source()
     return jsonify(result), 200
+
+
+@app.route("/api/myseed_preview")
+def myseed_preview():
+    # Uses the same MySeed parser as the poller, but is strictly read-only.
+    session = None
+    response = None
+    try:
+        session = cloudscraper.create_scraper()
+        response = session.get(
+            MYSEED_RECENT_URL,
+            timeout=25,
+            allow_redirects=True,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+                "Referer": MYSEED_RECENT_URL
+            }
+        )
+        if not response.ok:
+            return jsonify({
+                "status": "source_http_error",
+                "http_status": response.status_code,
+                "message_sending": False,
+                "database_writes": False
+            }), 502
+        items = _parse_myseed_recent_response(response)
+        preview = []
+        for item in items[:5]:
+            _enrich_myseed_item(item, session)
+            preview.append({
+                "title": item.get("title"),
+                "link": item.get("link"),
+                "image": item.get("image"),
+                "year": item.get("year") or None,
+                "work_type": item.get("work_type") or None,
+                "genres": item.get("genres") or [],
+                "country": item.get("country") or None,
+                "rating": item.get("rating") or None,
+                "rating_source": item.get("rating_source"),
+                "story": item.get("story") or None,
+                "story_source": item.get("story_source"),
+                "detail_status": item.get("detail_status")
+            })
+        return jsonify({
+            "status": "preview_complete",
+            "code_version": APP_CODE_VERSION,
+            "source": MYSEED_RECENT_URL,
+            "items_found": len(items),
+            "items_previewed": len(preview),
+            "message_sending": False,
+            "database_writes": False,
+            "items": preview
+        }), 200
+    except Exception as exc:
+        return jsonify({
+            "status": "preview_error",
+            "code_version": APP_CODE_VERSION,
+            "message_sending": False,
+            "database_writes": False,
+            "error": f"{type(exc).__name__}: {exc}"
+        }), 502
+    finally:
+        if response is not None:
+            response.close()
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
 
 
 @app.route("/api/check_updates")
