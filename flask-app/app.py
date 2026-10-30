@@ -15,7 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-31-myseed-clear-messages-18"
+APP_CODE_VERSION = "2026-10-31-myseed-clear-messages-19"
 MYSEED_RECENT_URL = "https://m.myseed.tv/recently/"
 MYSEED_ALLOWED_HOSTS = {"m.myseed.tv", "myseed.tv", "www.myseed.tv"}
 SOURCE_URL = os.environ.get("SOURCE_URL", MYSEED_RECENT_URL).strip()
@@ -66,6 +66,23 @@ def init_db():
             sender TEXT,
             msg_time TEXT
         )
+    """)
+
+    # Separate the visible/send history from the deduplication ledger.
+    # Historical URLs (including the first-run baseline marker) are migrated
+    # before the poller starts, so old MySeed items are never re-sent.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS processed_links (
+            link TEXT PRIMARY KEY,
+            created_at TEXT
+        )
+    """)
+    cur.execute("""
+        INSERT INTO processed_links(link, created_at)
+        SELECT DISTINCT message, COALESCE(msg_time, '')
+        FROM messages
+        WHERE message IS NOT NULL AND BTRIM(message) <> ''
+        ON CONFLICT (link) DO NOTHING
     """)
 
     conn.commit()
@@ -1335,25 +1352,25 @@ def check_updates(max_items=5):
             # blasting the WhatsApp group with up to five already-published titles.
             baseline_marker = "__MYSEED_BASELINE_V1__"
             cur.execute(
-                "SELECT 1 FROM messages WHERE phone=%s AND sender=%s AND message=%s LIMIT 1",
-                ("myseed-baseline", "system", baseline_marker)
+                "SELECT 1 FROM processed_links WHERE link=%s LIMIT 1",
+                (baseline_marker,)
             )
             if not cur.fetchone():
                 baseline_count = 0
+                baseline_time = datetime.now().strftime("%H:%M")
                 for known_item in items:
                     known_link = (known_item.get("link") or "").strip()
                     if not known_link:
                         continue
-                    cur.execute("SELECT 1 FROM messages WHERE message=%s LIMIT 1", (known_link,))
-                    if not cur.fetchone():
-                        cur.execute(
-                            "INSERT INTO messages(phone,message,sender,msg_time) VALUES('myseed-baseline',%s,'system',%s)",
-                            (known_link, datetime.now().strftime("%H:%M"))
-                        )
+                    cur.execute(
+                        "INSERT INTO processed_links(link,created_at) VALUES(%s,%s) ON CONFLICT (link) DO NOTHING",
+                        (known_link, baseline_time)
+                    )
+                    if cur.rowcount:
                         baseline_count += 1
                 cur.execute(
-                    "INSERT INTO messages(phone,message,sender,msg_time) VALUES('myseed-baseline',%s,'system',%s)",
-                    (baseline_marker, datetime.now().strftime("%H:%M"))
+                    "INSERT INTO processed_links(link,created_at) VALUES(%s,%s) ON CONFLICT (link) DO NOTHING",
+                    (baseline_marker, baseline_time)
                 )
                 conn.commit()
                 result["baseline_initialized"] = True
@@ -1370,7 +1387,7 @@ def check_updates(max_items=5):
                     continue
 
                 # Feed entries are newest-first: stop at the first known link before checking image availability.
-                cur.execute("SELECT 1 FROM messages WHERE message=%s LIMIT 1", (link,))
+                cur.execute("SELECT 1 FROM processed_links WHERE link=%s LIMIT 1", (link,))
                 if cur.fetchone():
                     result["duplicate_stop"] = True
                     break
@@ -1464,9 +1481,14 @@ def check_updates(max_items=5):
                     result["failed"] += 1
                     continue
 
+                sent_time = datetime.now().strftime("%H:%M")
                 cur.execute(
                     "INSERT INTO messages(phone,message,sender,msg_time) VALUES('system',%s,'system',%s)",
-                    (link, datetime.now().strftime("%H:%M"))
+                    (link, sent_time)
+                )
+                cur.execute(
+                    "INSERT INTO processed_links(link,created_at) VALUES(%s,%s) ON CONFLICT (link) DO NOTHING",
+                    (link, sent_time)
                 )
                 conn.commit()
                 result["sent"] += 1
@@ -2268,8 +2290,8 @@ def force_check():
 
 @app.route("/api/clear_messages")
 def clear():
-    # Serialize the clear operation with the automatic/manual poller.
-    # Clearing the dedupe table must not race with check_updates().
+    # Clear only the visible/send history. The processed_links ledger is kept
+    # separately, so the next poll does not resend previously handled MySeed items.
     if not _CHECK_LOCK.acquire(blocking=False):
         return jsonify({
             "status": "check_in_progress",
@@ -2278,68 +2300,25 @@ def clear():
             "message": "An update check is running; no records were cleared. Retry after it finishes."
         }), 409
 
-    session = None
-    response = None
     conn = None
     cur = None
     try:
-        # Refresh the MySeed baseline as part of the clear operation. This keeps
-        # already-published items marked as seen, so clearing history cannot
-        # accidentally resend old items on the next 30-second poll.
-        session = cloudscraper.create_scraper()
-        response = session.get(
-            MYSEED_RECENT_URL,
-            timeout=25,
-            allow_redirects=True,
-            headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
-                "Referer": MYSEED_RECENT_URL
-            }
-        )
-        response.raise_for_status()
-        source_items = _parse_myseed_recent_response(response)
-        baseline_links = list(dict.fromkeys(
-            (item.get("link") or "").strip()
-            for item in source_items
-            if (item.get("link") or "").strip()
-        ))
-        if not baseline_links:
-            return jsonify({
-                "status": "source_empty",
-                "message_sending": False,
-                "database_writes": False,
-                "message": "MySeed returned no usable items; existing records were left untouched."
-            }), 502
-
         conn = db()
         cur = conn.cursor()
         cur.execute("DELETE FROM messages")
         deleted_records = cur.rowcount
-
-        now_text = datetime.now().strftime("%H:%M")
-        for link in baseline_links:
-            cur.execute(
-                "INSERT INTO messages(phone,message,sender,msg_time) VALUES(%s,%s,%s,%s)",
-                ("myseed-baseline", link, "system", now_text)
-            )
-
-        baseline_marker = "__MYSEED_BASELINE_V1__"
-        cur.execute(
-            "INSERT INTO messages(phone,message,sender,msg_time) VALUES(%s,%s,%s,%s)",
-            ("myseed-baseline", baseline_marker, "system", now_text)
-        )
+        cur.execute("SELECT COUNT(*) FROM processed_links WHERE link <> %s", ("__MYSEED_BASELINE_V1__",))
+        seen_links_preserved = cur.fetchone()[0]
         conn.commit()
 
         return jsonify({
             "status": "cleared",
             "deleted_records": deleted_records,
-            "baseline_items_recorded": len(baseline_links),
-            "baseline_marker_preserved": True,
-            "source": MYSEED_RECENT_URL,
+            "seen_links_preserved": seen_links_preserved,
+            "dedupe_ledger_preserved": True,
             "message_sending": False,
             "database_writes": True,
-            "message": "Old message history cleared. Current MySeed items were retained as seen to prevent accidental resend."
+            "message": "Message history cleared. Previously processed source links were retained to prevent duplicate sends."
         }), 200
     except Exception as exc:
         if conn is not None:
@@ -2355,13 +2334,6 @@ def clear():
             "error": f"{type(exc).__name__}: {exc}"
         }), 502
     finally:
-        if response is not None:
-            response.close()
-        if session is not None:
-            try:
-                session.close()
-            except Exception:
-                pass
         if cur is not None:
             try:
                 cur.close()
