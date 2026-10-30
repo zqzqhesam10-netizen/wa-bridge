@@ -2268,13 +2268,111 @@ def force_check():
 
 @app.route("/api/clear_messages")
 def clear():
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM messages")
-    conn.commit()
-    cur.close()
-    conn.close()
-    return "cleared"
+    # Serialize the clear operation with the automatic/manual poller.
+    # Clearing the dedupe table must not race with check_updates().
+    if not _CHECK_LOCK.acquire(blocking=False):
+        return jsonify({
+            "status": "check_in_progress",
+            "message_sending": False,
+            "database_writes": False,
+            "message": "An update check is running; no records were cleared. Retry after it finishes."
+        }), 409
+
+    session = None
+    response = None
+    conn = None
+    cur = None
+    try:
+        # Refresh the MySeed baseline as part of the clear operation. This keeps
+        # already-published items marked as seen, so clearing history cannot
+        # accidentally resend old items on the next 30-second poll.
+        session = cloudscraper.create_scraper()
+        response = session.get(
+            MYSEED_RECENT_URL,
+            timeout=25,
+            allow_redirects=True,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+                "Referer": MYSEED_RECENT_URL
+            }
+        )
+        response.raise_for_status()
+        source_items = _parse_myseed_recent_response(response)
+        baseline_links = list(dict.fromkeys(
+            (item.get("link") or "").strip()
+            for item in source_items
+            if (item.get("link") or "").strip()
+        ))
+        if not baseline_links:
+            return jsonify({
+                "status": "source_empty",
+                "message_sending": False,
+                "database_writes": False,
+                "message": "MySeed returned no usable items; existing records were left untouched."
+            }), 502
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM messages")
+        deleted_records = cur.rowcount
+
+        now_text = datetime.now().strftime("%H:%M")
+        for link in baseline_links:
+            cur.execute(
+                "INSERT INTO messages(phone,message,sender,msg_time) VALUES(%s,%s,%s,%s)",
+                ("myseed-baseline", link, "system", now_text)
+            )
+
+        baseline_marker = "__MYSEED_BASELINE_V1__"
+        cur.execute(
+            "INSERT INTO messages(phone,message,sender,msg_time) VALUES(%s,%s,%s,%s)",
+            ("myseed-baseline", baseline_marker, "system", now_text)
+        )
+        conn.commit()
+
+        return jsonify({
+            "status": "cleared",
+            "deleted_records": deleted_records,
+            "baseline_items_recorded": len(baseline_links),
+            "baseline_marker_preserved": True,
+            "source": MYSEED_RECENT_URL,
+            "message_sending": False,
+            "database_writes": True,
+            "message": "Old message history cleared. Current MySeed items were retained as seen to prevent accidental resend."
+        }), 200
+    except Exception as exc:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        print("CLEAR MESSAGES ERROR:", f"{type(exc).__name__}: {exc}", flush=True)
+        return jsonify({
+            "status": "clear_failed",
+            "message_sending": False,
+            "database_writes": False,
+            "error": f"{type(exc).__name__}: {exc}"
+        }), 502
+    finally:
+        if response is not None:
+            response.close()
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _CHECK_LOCK.release()
 
 
 @app.route("/api/send_test")
