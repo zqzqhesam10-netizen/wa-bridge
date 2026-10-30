@@ -1,0 +1,21 @@
+working_directory: "flask-app"
+
+build:
+  command: "pip install -r requirements.txt"
+  system: auto
+
+start_command: "gunicorn --workers 1 --bind 0.0.0.0:$PORT hostless_entry:app"
+
+scaling:
+  trigger: http_requests
+  min_cpu: 0.1
+  max_cpu: 0.25
+  min_memory: 256
+  max_memory: 512
+  min_replicas: 1
+  max_replicas: 1
+
+health_check:
+  type: http
+  http_path: "/"
+  interval_in_seconds: 30

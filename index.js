@@ -50,7 +50,7 @@ async function startBot() {
     await initDB();
 
     const { state, saveCreds } =
-        await useMultiFileAuthState("auth_info");
+        await useMultiFileAuthState(process.env.AUTH_DIR || "auth_info");
 
     sock = makeWASocket({
         auth: state,
@@ -159,41 +159,69 @@ app.get("/qr", async (req, res) => {
 // ================= SEND TEXT / IMAGE =================
 
 app.post("/send", async (req, res) => {
+    const { groupId, image, caption } = req.body || {};
+
+    if (!sock || !isConnected) {
+        console.log("SEND REJECTED: WhatsApp is not connected");
+        return res.status(503).json({ ok: false, error: "WhatsApp is not connected" });
+    }
+    if (typeof groupId !== "string" || !groupId.endsWith("@g.us")) {
+        return res.status(400).json({ ok: false, error: "groupId must be a WhatsApp group JID ending in @g.us" });
+    }
+    if (typeof image !== "string" || !/^https?:\/\//i.test(image)) {
+        return res.status(400).json({ ok: false, error: "image must be an absolute HTTP(S) URL" });
+    }
+
     try {
-
-        const {
-            groupId,
-            image,
-            caption
-        } = req.body;
-
-        await sock.sendMessage(groupId, {
-            image: {
-                url: image
-            },
+        console.log(`SEND REQUEST: group=${groupId} image_host=${new URL(image).host}`);
+        const sentMessage = await sock.sendMessage(groupId, {
+            image: { url: image },
             caption: caption || ""
         });
-
-        res.json({
-            ok: true
-        });
-
+        const messageId = sentMessage?.key?.id || null;
+        const remoteJid = sentMessage?.key?.remoteJid || groupId;
+        console.log(`SEND ACCEPTED: group=${groupId} message_id=${messageId || "unknown"} remote_jid=${remoteJid}`);
+        return res.json({ ok: true, messageId, remoteJid });
     } catch (e) {
-
-        console.log(e);
-
-        res.status(500).json({
-            error: e.message
-        });
+        console.error("SEND FAILED:", e);
+        return res.status(500).json({ ok: false, error: e.message || "WhatsApp send failed" });
     }
 });
+
+// ================= FLASK HELPER PROXY =================
+// Keep the existing Flask helper endpoints on the same public app URL.
+// The Flask process listens only on loopback inside this container.
+const FLASK_INTERNAL_PORT = process.env.FLASK_INTERNAL_PORT || "5001";
+async function proxyToFlask(req, res) {
+    try {
+        const target = `http://127.0.0.1:${FLASK_INTERNAL_PORT}${req.originalUrl}`;
+        const upstream = await fetch(target, { method: req.method });
+        const body = await upstream.text();
+        const contentType = upstream.headers.get("content-type");
+        if (contentType) res.set("Content-Type", contentType);
+        return res.status(upstream.status).send(body);
+    } catch (error) {
+        console.error("Flask helper proxy failed:", error.message);
+        return res.status(502).json({
+            status: "error",
+            message: "Flask helper is temporarily unavailable"
+        });
+    }
+}
+
+app.get("/api/source_diagnostic", proxyToFlask);
+app.get("/api/myseed_diagnostic", proxyToFlask);
+app.get("/api/myseed_preview", proxyToFlask);
+app.get("/api/check_updates", proxyToFlask);
+app.get("/api/clear_messages", proxyToFlask);
+app.get("/api/send_test", proxyToFlask);
 
 // ================= SERVER =================
 
 const PORT =
     process.env.PORT || 10000;
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
     console.log("🚀 Server running on", PORT);
 });
 
