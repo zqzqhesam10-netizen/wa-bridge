@@ -1418,7 +1418,7 @@ def check_updates(max_items=5):
                     year_source = "unavailable"
                 # Keep work format (film/series/anime) separate from actual genres
                 # (Drama/Action/Comedy). Never display "فيلم" as a genre fallback.
-                duration_line = f"⏱️ المدة: {duration}" if duration else ""
+                duration_line = f"⏱️ المدة: {duration}\n" if duration else ""
                 work_kind_text = work_type or "غير محدد"
                 genre_text = "، ".join(genres) if genres else "غير محدد"
                 country_text = country if country else "غير محددة"
@@ -1430,7 +1430,7 @@ def check_updates(max_items=5):
                 caption = (
                     f"📺 {title}\n"
                     f"{year_line}\n"
-                    f"{duration_line}\n" if duration_line else ""
+                    f"{duration_line}"
                     f"🎬 نوع العمل: {work_kind_text}\n"
                     f"🎭 التصنيف: {genre_text}\n"
                     f"🌍 الدولة: {country_text}\n"
