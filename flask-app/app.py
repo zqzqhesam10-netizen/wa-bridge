@@ -15,7 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-30-myseed-story-genre-polish-16"
+APP_CODE_VERSION = "2026-10-31-myseed-arabic-year-duration-17"
 MYSEED_RECENT_URL = "https://m.myseed.tv/recently/"
 MYSEED_ALLOWED_HOSTS = {"m.myseed.tv", "myseed.tv", "www.myseed.tv"}
 SOURCE_URL = os.environ.get("SOURCE_URL", MYSEED_RECENT_URL).strip()
@@ -1032,6 +1032,26 @@ def _myseed_link_values(node, path_prefix):
     return values
 
 
+def _myseed_extract_duration(soup):
+    """Read MySeed's duration when available; keep the site's original duration wording."""
+    _, duration_raw = _myseed_labeled_li(soup, "مدة العرض")
+    duration = re.sub(r"\\s+", " ", str(duration_raw or "")).strip(" :：-")
+    if duration:
+        return duration
+
+    # Fallback for layouts where the duration is rendered in the details panel
+    # but is not wrapped in a labeled list item.
+    info_node = soup.select_one(".info__side")
+    info_text = _myseed_text(info_node, 5000) if info_node else ""
+    match = re.search(
+        r"(?:^|\\s)مدة\\s+العرض\\s*[:：]?\\s*(.+?)"
+        r"(?=\\s+(?:سنة\\s+العرض|لغة\\s+العرض|جودة\\s+العرض|"
+        r"بلد\\s+العرض|تصنيف\\s+العرض|نوع\\s+العرض)\\s*[:：]?|$)",
+        info_text
+    )
+    return re.sub(r"\\s+", " ", match.group(1)).strip(" :：-") if match else ""
+
+
 def _myseed_extract_detail(item, soup):
     """Extract fields from MySeed's verified detail-page labels and taxonomy links."""
     title = item.get("title") or "جديد"
@@ -1063,6 +1083,8 @@ def _myseed_extract_detail(item, soup):
         if not year:
             match = _YEAR_RE.search(_latin_digits(year_raw))
             year = match.group(0) if match else ""
+
+    duration = _myseed_extract_duration(soup)
 
     country_node, country_raw = _myseed_labeled_li(soup, "بلد العرض")
     country_values = _myseed_link_values(country_node, "/country/")
@@ -1136,6 +1158,7 @@ def _myseed_extract_detail(item, soup):
     item.update({
         "title": title,
         "year": year,
+        "duration": duration,
         "genres": genres,
         "country": country,
         "work_type": work_type,
@@ -1366,6 +1389,7 @@ def check_updates(max_items=5):
                     genres = item.get("genres") or []
                     country = item.get("country") or ""
                     year = item.get("year") or ""
+                    duration = item.get("duration") or ""
                     work_type = item.get("work_type") or _infer_work_type(item)
                     detail_status = item.get("detail_status") or "not_fetched"
                     story_text = item.get("story") or ""
@@ -1379,20 +1403,22 @@ def check_updates(max_items=5):
                     work_type = _infer_work_type(item)
                     detail_status = "public_api_only_page_blocked"
                     year = year or _extract_year(title=title, url=link, markup=metadata_html)
+                    duration = ""
                     publication_year = _get_post_publication_year(item)
                     story_text, story_source = _extract_story(item, max_chars=650)
                     rating, rating_source = _extract_rating(item)
                 if year:
-                    year_line = f"📅 سنة العمل: {year}"
+                    year_line = f"📅 سنة العرض: {year}"
                     year_source = "work_year"
                 elif publication_year:
                     year_line = f"🗓️ سنة الإضافة: {publication_year}"
                     year_source = "post_publication_year"
                 else:
-                    year_line = "📅 سنة العمل: غير منشورة"
+                    year_line = "📅 سنة العرض: غير منشورة"
                     year_source = "unavailable"
                 # Keep work format (film/series/anime) separate from actual genres
                 # (Drama/Action/Comedy). Never display "فيلم" as a genre fallback.
+                duration_line = f"⏱️ المدة: {duration}" if duration else ""
                 work_kind_text = work_type or "غير محدد"
                 genre_text = "، ".join(genres) if genres else "غير محدد"
                 country_text = country if country else "غير محددة"
@@ -1404,6 +1430,7 @@ def check_updates(max_items=5):
                 caption = (
                     f"📺 {title}\n"
                     f"{year_line}\n"
+                    f"{duration_line + chr(10) if duration_line else ''}"
                     f"🎬 نوع العمل: {work_kind_text}\n"
                     f"🎭 التصنيف: {genre_text}\n"
                     f"🌍 الدولة: {country_text}\n"
@@ -1417,7 +1444,8 @@ def check_updates(max_items=5):
                 result["send_results"].append({
                     "title": title,
                     "link": link,
-                    "year": year or None,
+                    "سنة العرض": year or None,
+                    "المدة": duration or None,
                     "year_source": year_source,
                     "publication_year": publication_year or None,
                     "genres": genres,
@@ -2166,7 +2194,8 @@ def myseed_preview():
                 "title": item.get("title"),
                 "link": item.get("link"),
                 "image": item.get("image"),
-                "year": item.get("year") or None,
+                "سنة العرض": item.get("year") or None,
+                "المدة": item.get("duration") or None,
                 "work_type": item.get("work_type") or None,
                 "genres": item.get("genres") or [],
                 "country": item.get("country") or None,
