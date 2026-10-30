@@ -1213,7 +1213,9 @@ def check_updates(max_items=5):
         "skipped_missing_image": 0,
         "duplicate_stop": False,
         "send_results": [],
-        "errors": []
+        "errors": [],
+        "baseline_initialized": False,
+        "baseline_items_recorded": 0
     }
     conn = None
     cur = None
@@ -1252,7 +1254,7 @@ def check_updates(max_items=5):
             response.raise_for_status()
 
         effective_source_url = result["source"]
-        if (urlparse(response.url or result["source"]).hostname in MYSEED_ALLOWED_HOSTS:
+        if urlparse(response.url or result["source"]).hostname in MYSEED_ALLOWED_HOSTS:
             items = _parse_myseed_recent_response(response)
             source_format = "myseed_html"
         else:
@@ -1440,7 +1442,7 @@ def check_updates(max_items=5):
             result["status"] = "partial" if result["sent"] else "send_failed"
         elif result["sent"]:
             result["status"] = "done"
-        elif result["status"] not in ("no_candidates", "error"):
+        elif result["status"] not in ("no_candidates", "error", "baseline_initialized"):
             result["status"] = "no_new_items" if result["duplicate_stop"] else "no_candidates"
 
     except Exception as e:
@@ -1848,10 +1850,6 @@ def diagnose_public_sources():
 
 
 # ================= MYSEED READ-ONLY SOURCE PROBE =================
-MYSEED_RECENT_URL = "https://m.myseed.tv/recently/"
-MYSEED_ALLOWED_HOSTS = {"m.myseed.tv", "myseed.tv", "www.myseed.tv"}
-
-
 def _myseed_text(value, limit=700):
     text = BeautifulSoup(str(value or ""), "html.parser").get_text(" ", strip=True)
     return " ".join(text.split())[:limit]
