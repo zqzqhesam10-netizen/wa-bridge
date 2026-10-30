@@ -1035,7 +1035,7 @@ def _myseed_link_values(node, path_prefix):
 def _myseed_extract_duration(soup):
     """Read MySeed's duration when available; keep the site's original duration wording."""
     _, duration_raw = _myseed_labeled_li(soup, "مدة العرض")
-    duration = re.sub(r"\\s+", " ", str(duration_raw or "")).strip(" :：-")
+    duration = re.sub(r"\s+", " ", str(duration_raw or "")).strip(" :：-")
     if duration:
         return duration
 
@@ -1044,12 +1044,12 @@ def _myseed_extract_duration(soup):
     info_node = soup.select_one(".info__side")
     info_text = _myseed_text(info_node, 5000) if info_node else ""
     match = re.search(
-        r"(?:^|\\s)مدة\\s+العرض\\s*[:：]?\\s*(.+?)"
-        r"(?=\\s+(?:سنة\\s+العرض|لغة\\s+العرض|جودة\\s+العرض|"
-        r"بلد\\s+العرض|تصنيف\\s+العرض|نوع\\s+العرض)\\s*[:：]?|$)",
+        r"(?:^|\s)مدة\s+العرض\s*[:：]?\s*(.+?)"
+        r"(?=\s+(?:سنة\s+العرض|لغة\s+العرض|جودة\s+العرض|"
+        r"بلد\s+العرض|تصنيف\s+العرض|نوع\s+العرض)\s*[:：]?|$)",
         info_text
     )
-    return re.sub(r"\\s+", " ", match.group(1)).strip(" :：-") if match else ""
+    return re.sub(r"\s+", " ", match.group(1)).strip(" :：-") if match else ""
 
 
 def _myseed_extract_detail(item, soup):
@@ -1430,7 +1430,7 @@ def check_updates(max_items=5):
                 caption = (
                     f"📺 {title}\n"
                     f"{year_line}\n"
-                    f"{duration_line + chr(10) if duration_line else ''}"
+                    f"{duration_line}\n" if duration_line else ""
                     f"🎬 نوع العمل: {work_kind_text}\n"
                     f"🎭 التصنيف: {genre_text}\n"
                     f"🌍 الدولة: {country_text}\n"
