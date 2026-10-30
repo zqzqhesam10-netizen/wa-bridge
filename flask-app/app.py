@@ -15,7 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-29-release-year-rating-12"
+APP_CODE_VERSION = "2026-10-30-myseed-readonly-probe-13"
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://tuktukcinemas.com/recent/feed/").strip()
 
 # Canonicalize a legacy environment value that still points at the Cloudflare-protected HTML page.
@@ -1510,6 +1510,273 @@ def diagnose_public_sources():
         "next_step": next_step
     }
 
+
+
+# ================= MYSEED READ-ONLY SOURCE PROBE =================
+MYSEED_RECENT_URL = "https://m.myseed.tv/recently/"
+MYSEED_ALLOWED_HOSTS = {"m.myseed.tv", "myseed.tv", "www.myseed.tv"}
+
+
+def _myseed_text(value, limit=700):
+    text = BeautifulSoup(str(value or ""), "html.parser").get_text(" ", strip=True)
+    return " ".join(text.split())[:limit]
+
+
+def _myseed_dom_summary(node, base_url):
+    if node is None:
+        return None
+    classes = node.get("class") or []
+    image_urls = []
+    for image in node.find_all("img", limit=4):
+        candidate = image.get("data-src") or image.get("data-lazy-src") or image.get("src")
+        if candidate:
+            image_urls.append(urljoin(base_url, candidate))
+    links = []
+    for anchor in node.find_all("a", href=True, limit=8):
+        absolute = urljoin(base_url, anchor.get("href", ""))
+        parsed = urlparse(absolute)
+        if parsed.hostname in MYSEED_ALLOWED_HOSTS and absolute not in links:
+            links.append(absolute)
+    return {
+        "tag": getattr(node, "name", None),
+        "id": node.get("id") if hasattr(node, "get") else None,
+        "classes": classes[:12] if isinstance(classes, list) else [],
+        "text": _myseed_text(node, 900),
+        "images": image_urls,
+        "links": links
+    }
+
+
+def _myseed_field_blocks(soup):
+    labels = (
+        "قصة العرض", "سنة العرض", "بلد العرض", "نوع العرض",
+        "تصنيف العرض", "التقييم", "تقييم الزوار"
+    )
+    found = {}
+    all_nodes = soup.find_all(["h1", "h2", "h3", "h4", "p", "li", "dt", "dd", "div", "span", "strong"])
+    for label in labels:
+        matches = []
+        for node in all_nodes:
+            node_text = _myseed_text(node, 1600)
+            if label.casefold() not in node_text.casefold():
+                continue
+            if not node_text:
+                continue
+            matches.append((len(node_text), node))
+        matches.sort(key=lambda pair: pair[0])
+        found[label] = [
+            _myseed_dom_summary(node, MYSEED_RECENT_URL)
+            for _, node in matches[:3]
+        ]
+    return found
+
+
+def diagnose_myseed_source():
+    """Read-only connectivity/DOM probe. Never writes to DB or sends WhatsApp messages."""
+    result = {
+        "status": "starting",
+        "code_version": APP_CODE_VERSION,
+        "source": MYSEED_RECENT_URL,
+        "message_sending": False,
+        "database_writes": False,
+        "source_http_status": None,
+        "final_url": None,
+        "content_type": None,
+        "server": None,
+        "body_bytes": 0,
+        "challenge_detected": False,
+        "error": None,
+        "listing": {},
+        "detail_samples": []
+    }
+    session = None
+    response = None
+    try:
+        session = cloudscraper.create_scraper()
+        response = session.get(
+            MYSEED_RECENT_URL,
+            timeout=25,
+            allow_redirects=True,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+                "Referer": "https://m.myseed.tv/"
+            }
+        )
+        result["source_http_status"] = response.status_code
+        result["final_url"] = response.url
+        result["content_type"] = response.headers.get("Content-Type")
+        result["server"] = response.headers.get("Server")
+        body = response.text or ""
+        result["body_bytes"] = len(response.content or b"")
+        body_lower = body[:12000].casefold()
+        result["challenge_detected"] = any(marker in body_lower for marker in (
+            "just a moment", "enable javascript and cookies to continue",
+            "checking your browser", "cf-chl-", "challenge-platform",
+            "access denied", "request blocked"
+        ))
+        if not response.ok:
+            result["error"] = f"Listing returned HTTP {response.status_code}"
+            result["status"] = "listing_http_error"
+            return result
+        if result["challenge_detected"]:
+            result["error"] = "Listing returned an anti-bot/challenge page"
+            result["status"] = "listing_challenge"
+            return result
+
+        soup = BeautifulSoup(body, "html.parser")
+        title_node = soup.find("title")
+        canonical = soup.find("link", rel=lambda value: value and "canonical" in value)
+        listing = {
+            "page_title": _myseed_text(title_node, 250),
+            "canonical_url": urljoin(response.url, canonical.get("href")) if canonical and canonical.get("href") else None,
+            "body_text_preview": _myseed_text(soup.body or soup, 2200),
+            "image_count": len(soup.find_all("img")),
+            "anchor_count": len(soup.find_all("a", href=True)),
+            "candidate_detail_links": [],
+            "card_dom_samples": []
+        }
+
+        candidates = {}
+        for anchor in soup.find_all("a", href=True):
+            absolute = urljoin(response.url, anchor.get("href", ""))
+            parsed = urlparse(absolute)
+            if parsed.hostname not in MYSEED_ALLOWED_HOSTS:
+                continue
+            path = parsed.path.rstrip("/")
+            if not path or path == "/recently":
+                continue
+            lowered = path.casefold()
+            if any(part in lowered for part in (
+                "/category/", "/tag/", "/page/", "/search/", "/author/",
+                "/genre/", "/country/", "/release-year/", "/feed/"
+            )):
+                continue
+            if re.search(r"\.(?:jpg|jpeg|png|webp|gif|svg|css|js|xml)$", lowered):
+                continue
+
+            image_present = anchor.find("img") is not None
+            anchor_text = _myseed_text(anchor, 180)
+            score = (5 if image_present else 0) + (2 if len(anchor_text) >= 12 else 0)
+            score += 1 if any(word in " ".join(anchor.get("class") or []).casefold()
+                              for word in ("title", "post", "item", "movie", "serie")) else 0
+            current = candidates.get(absolute)
+            if current is None or score > current["score"]:
+                candidates[absolute] = {
+                    "url": absolute,
+                    "score": score,
+                    "anchor_text": anchor_text,
+                    "image_present": image_present,
+                    "anchor": anchor
+                }
+
+        ordered = sorted(candidates.values(), key=lambda item: (-item["score"], item["url"]))
+        for candidate in ordered[:12]:
+            listing["candidate_detail_links"].append({
+                "url": candidate["url"],
+                "anchor_text": candidate["anchor_text"],
+                "image_present": candidate["image_present"],
+                "score": candidate["score"]
+            })
+            anchor = candidate["anchor"]
+            node = anchor
+            selected = None
+            for _ in range(7):
+                if node is None:
+                    break
+                if getattr(node, "name", None) in ("article", "li", "div", "section"):
+                    node_text = _myseed_text(node, 2400)
+                    if len(node_text) >= 35 and (node.find("img") is not None or len(node.find_all("a", href=True)) >= 2):
+                        selected = node
+                        break
+                node = node.parent
+            if selected is not None and len(listing["card_dom_samples"]) < 5:
+                summary = _myseed_dom_summary(selected, response.url)
+                summary["detail_url"] = candidate["url"]
+                listing["card_dom_samples"].append(summary)
+
+        result["listing"] = listing
+
+        # Read no more than three detail pages, never following or fetching TMDB links.
+        detail_candidates = [item["url"] for item in ordered if item["score"] >= 2][:3]
+        for detail_url in detail_candidates:
+            detail = {
+                "url": detail_url,
+                "http_status": None,
+                "final_url": None,
+                "challenge_detected": False,
+                "error": None,
+                "page_title": None,
+                "headings": [],
+                "meta_description": None,
+                "visible_text_preview": None,
+                "field_blocks": {},
+                "tmdb_links_seen_but_not_opened": 0
+            }
+            detail_response = None
+            try:
+                detail_response = session.get(
+                    detail_url,
+                    timeout=20,
+                    allow_redirects=True,
+                    headers={
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+                        "Referer": MYSEED_RECENT_URL
+                    }
+                )
+                detail["http_status"] = detail_response.status_code
+                detail["final_url"] = detail_response.url
+                detail_body = detail_response.text or ""
+                detail_lower = detail_body[:12000].casefold()
+                detail["challenge_detected"] = any(marker in detail_lower for marker in (
+                    "just a moment", "enable javascript and cookies to continue",
+                    "checking your browser", "cf-chl-", "challenge-platform",
+                    "access denied", "request blocked"
+                ))
+                if detail_response.ok and not detail["challenge_detected"]:
+                    detail_soup = BeautifulSoup(detail_body, "html.parser")
+                    detail_title = detail_soup.find("title")
+                    meta_desc = detail_soup.find("meta", attrs={"name": re.compile("^description$", re.I)})
+                    detail["page_title"] = _myseed_text(detail_title, 300)
+                    detail["meta_description"] = (meta_desc.get("content") or "")[:700] if meta_desc else None
+                    detail["headings"] = [
+                        _myseed_text(node, 180)
+                        for node in detail_soup.find_all(["h1", "h2", "h3", "h4"], limit=20)
+                    ]
+                    detail["visible_text_preview"] = _myseed_text(detail_soup.body or detail_soup, 5200)
+                    detail["field_blocks"] = _myseed_field_blocks(detail_soup)
+                    detail["tmdb_links_seen_but_not_opened"] = sum(
+                        1 for anchor in detail_soup.find_all("a", href=True)
+                        if (urlparse(anchor.get("href", "")).hostname or "").casefold().removeprefix("www.") == "themoviedb.org"
+                    )
+                elif not detail_response.ok:
+                    detail["error"] = f"Detail page returned HTTP {detail_response.status_code}"
+                elif detail["challenge_detected"]:
+                    detail["error"] = "Detail page returned an anti-bot/challenge page"
+            except Exception as exc:
+                detail["error"] = f"{type(exc).__name__}: {exc}"
+            finally:
+                if detail_response is not None:
+                    detail_response.close()
+            result["detail_samples"].append(detail)
+
+        result["status"] = "probe_complete"
+        return result
+    except Exception as exc:
+        result["status"] = "probe_error"
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        return result
+    finally:
+        if response is not None:
+            response.close()
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+
 # ================= ROUTES =================
 @app.route("/")
 def home():
@@ -1520,6 +1787,13 @@ def home():
 def source_diagnostic():
     # Read-only: probes public endpoints and never sends WhatsApp messages.
     return jsonify(diagnose_public_sources()), 200
+
+
+@app.route("/api/myseed_diagnostic")
+def myseed_diagnostic():
+    # Read-only MySeed connectivity and DOM probe. No WhatsApp sends and no database writes.
+    result = diagnose_myseed_source()
+    return jsonify(result), 200
 
 
 @app.route("/api/check_updates")
