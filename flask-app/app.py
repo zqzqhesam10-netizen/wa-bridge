@@ -15,7 +15,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 NODE_URL = os.environ.get("NODE_URL", "").strip()
 GROUP_ID = os.environ.get("GROUP_ID", "120363429067223078@g.us")
-APP_CODE_VERSION = "2026-10-31-myseed-arabic-year-duration-17"
+APP_CODE_VERSION = "2026-10-31-myseed-clear-messages-18"
 MYSEED_RECENT_URL = "https://m.myseed.tv/recently/"
 MYSEED_ALLOWED_HOSTS = {"m.myseed.tv", "myseed.tv", "www.myseed.tv"}
 SOURCE_URL = os.environ.get("SOURCE_URL", MYSEED_RECENT_URL).strip()
